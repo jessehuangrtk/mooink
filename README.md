@@ -136,3 +136,20 @@ py mooink_full_cmd_demo.py --ip 192.168.1.137
 ## 授權與安全
 
 專案自身原始碼以 MIT 授權；third_party/dpt-rp1-py 保留上游作者授權。不要將私人配對金鑰、裝置完整序號或個人檔案提交至 Git；研究資料與驗收報告務必先去識別化。
+
+
+## mooInk Word 顯示監控（Windows 系統匣）
+
+執行：python -m pip install -r requirements.txt，然後 python mooink_display_watcher.py。
+第一次啟動出現設定視窗，儲存後常駐系統匣。設定檔及成功傳送狀態位於 %LOCALAPPDATA%\mooink。
+預設檢查間隔 60 秒、尺寸 10.3、IP 192.168.1.140、Pico COM6（清空 COM 欄位可停用）。
+
+| 尺寸 | 監控 Word | 產出 PNG | 自訂 Word 紙張寬×高 |
+|---|---|---|---|
+| 10.3 | mooink_display_10.docx | mooink_display_10.png (1404×1872) | 15.70×20.93 cm |
+| 13.3 | mooink_display_13.docx | mooink_display_13.png (1650×2200) | 20.27×27.03 cm |
+
+兩個 Word 都設直式、0.5 cm 邊界、單頁。程式依目前設定的裝置尺寸監控對應 DOCX，保留兩個尺寸獨立檔名，不會傳錯另一尺寸。需要 Word 或 LibreOffice。超過一頁會報錯，不會自動截掉第二頁。
+
+**Wi-Fi 限制：** 尚未證實第一代 mooInk 原生 Sony API 能把 PNG 寫入 sleep。程式只接受明確設定、實際可存取的同 IP UNC sleep 共享資料夾；不猜測 SMB 分享名稱，不會用 dptrp1 上傳 PNG 冒充 sleep 圖更新。未設定共享時只輸出本機 PNG，不送出 F12。若有真實共享，僅更新本程式的同名 PNG，暫存與回讀 SHA-256 驗證成功後才呼叫 Pico F12；Pico 不存在或未設定時略過。未確認實機能經此方式顯示該 PNG。裝置須已選取適當休眠圖並設好 15 秒自動休眠。
+

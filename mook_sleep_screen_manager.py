@@ -499,7 +499,7 @@ class SleepScreenManager:
         self.io = io_layer
         self.logs = []
 
-    def _pdf_pages(self, source: Path, temporary_dir: Path):
+    def _pdf_pages(self, source: Path, temporary_dir: Path, render_scale=1.5):
         """Render each Office document page with Office COM or LibreOffice."""
         import fitz
         pdf = temporary_dir / (safe_file_name(source.stem) + ".pdf")
@@ -559,7 +559,7 @@ class SleepScreenManager:
                     self.logs.append("Page limit 100 reached: " + source.name)
                     break
                 # Limit large PDF render output memory; final resize to device.
-                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                pix = page.get_pixmap(matrix=fitz.Matrix(render_scale, render_scale), alpha=False)
                 from PIL import Image
                 image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
                 yield index + 1, image
