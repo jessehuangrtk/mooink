@@ -13,6 +13,8 @@ from mook_mtp_wpd import (
     _choose_device,
     _sleep_directory,
     backup_and_delete_one,
+    upload_one,
+    list_images,
 )
 from mook_sleep_screen_manager import MooinkLowLevel, SleepScreenManager
 
@@ -44,6 +46,10 @@ class FakeFolder:
 
     def get_children(self):
         return list(self.children)
+
+    def upload_file(self, filename, source):
+        item = FakeFile(self, filename, Path(source).read_bytes())
+        self.children.append(item)
 
 
 class FakeDevice:
@@ -169,6 +175,137 @@ class QuietWpdTests(unittest.TestCase):
                 )
         self.assertEqual([r["status"] for r in result],
                          ["failed", "blocked", "blocked"])
+
+
+class UploadWpdTests(unittest.TestCase):
+    def test_upload_and_sha256_verify_after_readback(self):
+        payload = png_data()
+        dev, sleep, _ = make_device(payload)
+        stages = []
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "fresh.png"
+            local.write_bytes(payload)
+            result = upload_one(
+                local, device_source=lambda: [dev],
+                progress=lambda stage, details: stages.append(stage),
+            )
+            self.assertIn("uploaded+sha256-verified", result)
+            uploaded = next(x for x in sleep.children if x.name == "fresh.png")
+            self.assertEqual(uploaded.payload, payload)
+            self.assertEqual(uploaded.download_count, 1)
+            self.assertEqual(uploaded.remove_count, 0)
+            self.assertEqual(stages[-1], "verified")
+            self.assertIn("uploading", stages)
+            self.assertIn("checking", stages)
+            self.assertIn("verifying", stages)
+            self.assertTrue(dev.closed)
+
+    def test_upload_rejects_existing_name_without_modification(self):
+        dev, sleep, first = make_device(png_data())
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "001.png"
+            local.write_bytes(b"other")
+            with self.assertRaises(FileExistsError):
+                upload_one(local, device_source=lambda: [dev])
+        self.assertEqual(sleep.children, [first])
+        self.assertEqual(first.download_count, 0)
+
+    def test_upload_wrong_readback_hash_fails_without_deleting(self):
+        dev, sleep, original = make_device(png_data())
+        original_upload = sleep.upload_file
+
+        def corrupt(filename, source):
+            original_upload(filename, source)
+            sleep.children[-1].payload = b"corrupted"
+
+        sleep.upload_file = corrupt
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "new.png"
+            local.write_bytes(png_data())
+            with self.assertRaisesRegex(RuntimeError, "回讀大小不符|SHA-256"):
+                upload_one(local, device_source=lambda: [dev])
+        self.assertEqual(sleep.children[0], original)
+        self.assertEqual(sleep.children[-1].remove_count, 0)
+        self.assertTrue(dev.closed)
+
+    def test_upload_wpd_missing_file_in_sleep_is_not_verified(self):
+        dev, sleep, _ = make_device(png_data())
+        sleep.upload_file = lambda name, path: None
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "vanish.png"
+            path.write_bytes(png_data())
+            with patch("mook_mtp_wpd.time.sleep", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "找不到"):
+                    upload_one(path, device_source=lambda: [dev])
+        self.assertTrue(dev.closed)
+
+    def test_list_images_wpd_contains_new_upload(self):
+        dev, sleep, _ = make_device(png_data())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "new.png"
+            path.write_bytes(png_data())
+            upload_one(path, device_source=lambda: [dev])
+            rows = list_images(device_source=lambda: [dev])
+        self.assertEqual([x["name"] for x in rows], ["001.png", "new.png"])
+
+    def test_backend_upload_delegates_to_wpd_not_shell_copyhere(self):
+        transport = MooinkLowLevel(transport="usb")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "new.png"
+            path.write_bytes(png_data())
+            with patch.object(transport, "usb_devices", return_value=["mooInk"]), \
+                 patch("mook_mtp_wpd.upload_one",
+                       return_value="uploaded+sha256-verified; sleep: new.png") as direct:
+                result = transport.add_file(path)
+            self.assertIn("uploaded+sha256-verified", result)
+            direct.assert_called_once()
+            self.assertEqual(direct.call_args.args[0], path)
+
+    def test_backend_upload_reports_every_file_and_duplicate_skips(self):
+        transport = MooinkLowLevel(transport="usb")
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b, c = [Path(tmp) / x for x in ("one.png", "two.png", "three.png")]
+            for item in (a, b, c):
+                item.write_bytes(png_data())
+            calls = []
+            updates = []
+
+            def fake_add(path, progress=None):
+                calls.append(path.name)
+                if path.name == "two.png":
+                    raise FileExistsError("same name")
+                if progress:
+                    progress("uploading", {"message": "mock"})
+                return "uploaded+sha256-verified; sleep: " + path.name
+
+            with patch.object(transport, "add_file", side_effect=fake_add):
+                manager = SleepScreenManager(io_layer=transport, output_dir=Path(tmp) / "prepared")
+                results = manager.manage(
+                    files=[a, b, c], operation="add", continue_on_error=True,
+                    on_stage=lambda index, total, record: updates.append(
+                        (index, record["stage"])),
+                )
+            self.assertEqual(calls, ["one.png", "two.png", "three.png"])
+            self.assertEqual([x["status"] for x in results], ["verified", "skipped", "verified"])
+            self.assertIn((1, "uploading"), updates)
+            self.assertIn((3, "verified"), updates)
+
+    def test_missing_wpd_backend_blocks_following_uploads(self):
+        transport = MooinkLowLevel(transport="usb")
+        with tempfile.TemporaryDirectory() as tmp:
+            imgs = [Path(tmp) / x for x in ("1.png", "2.png", "3.png")]
+            for src in imgs:
+                src.write_bytes(png_data())
+            with patch.object(transport, "usb_devices", return_value=["mooInk"]), \
+                 patch("mook_mtp_wpd.upload_one",
+                       side_effect=QuietMtpUnavailable("WPD missing")) as direct:
+                result = SleepScreenManager(
+                    io_layer=transport, output_dir=Path(tmp) / "prepared").manage(
+                        files=imgs, operation="add", continue_on_error=True,
+                    )
+            self.assertEqual([r["status"] for r in result], ["failed", "blocked", "blocked"])
+            direct.assert_called_once()
+
 
 
 if __name__ == "__main__":
