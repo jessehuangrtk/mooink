@@ -49,6 +49,25 @@ py mook_sleep_screen_manager_ui.py
 - 可在 GUI 的備份資料夾列點選 **清理空白備份子目錄**。只刪除該備份資料夾下一層、符合 `mooink_YYYYMMDD_HHMMSS_NNN` 格式且完全空白的子目錄，**不會遞迴刪除**，不會碰任何有檔案的目錄。請先確認沒有 Windows MTP 傳輸正在進行。
 - 若來源大小仍未知，可使用 **單張備份測試（不刪除）** 嘗試複製並確認本機圖片可以完整解碼。因為無法比對來源長度或位元組內容，這不是足以安全自動刪除原檔的驗證。
 
+## USB 批次刪除：只確認一次（直接 WPD）
+
+GUI 的「備份並刪除選取（一次確認）」**只在開始前顯示一次程式確認**。USB 模式改走直接 WPD 介面，不使用會造成 Windows 檔案總管逐張詢問的 `FolderItem.InvokeVerb("delete")`。
+
+**額外安裝一次（Windows、Python 3.10 或更新版）：**
+
+~~~powershell
+py --version
+py -m pip install "git+https://github.com/Heribert17/mtp.git"
+git pull
+py mook_sleep_screen_manager_ui.py
+~~~
+
+這是第三方 MIT 授權的 WPD Python 函式庫；主程式的 Python 3.9 功能維持不變，但這個額外的免逐張詢問功能需要 **Python 3.10+** 及可用的 Windows WPD 驅動。安裝後，先測試一張並保留原始圖片。
+
+**批次流程：** 選取 JPG/PNG → GUI 整批確認一次 → WPD 直接下載第一張 → 比對 WPD 來源與本機大小、解碼備份圖片 → WPD 刪除該張 → 再從裝置重新確認該檔消失 → 才處理下一張。沒有源大小、下載失敗、讀取到兩台匹配的裝置、`sleep` 目錄不唯一，或刪除結果無法確認，都會停止而非冒險刪除其他圖片。
+
+**限制：** 直接 WPD 已經做模擬測試，但**尚未在實際 mooInk 上測試其裝置名稱、MTP 路徑與刪除支援**。若缺少額外函式庫或不符合唯一裝置條件，GUI 會明確報告並停止；**不會悄悄退回 Explorer 逐張確認模式**。CLI 原本的 Shell 模式仍保留，方便相容性研究。
+
 ## USB MTP 備份診斷與安全保護
 
 **建議先做單張備份測試，不要直接對全部圖片執行刪除：**
