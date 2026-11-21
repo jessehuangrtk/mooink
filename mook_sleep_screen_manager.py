@@ -278,7 +278,7 @@ class MooinkLowLevel:
 
     def backup_and_delete(self, filename: str, backup_dir: Path, *,
                           confirm_delete=True, progress=None, backup_timeout=50.0,
-                          delete_after=True):
+                          delete_after=True, quiet_wpd=False):
         """Back up one file and verify before requesting deletion.
 
         MTP CopyHere has no true byte-progress API. progress(stage, details)
@@ -296,6 +296,17 @@ class MooinkLowLevel:
         notify("locate", message="確認裝置及圖片")
         if Path(filename).name != filename or Path(filename).suffix.lower() not in OUTPUT_EXTS:
             raise ValueError("只能刪除 sleep 根目錄下的 JPG/PNG，且不可使用路徑")
+        if quiet_wpd:
+            if self.transport != "usb":
+                raise RuntimeError("靜默 WPD 刪除僅限 USB；Wi-Fi 共享資料夾不需此模式")
+            # Cross-check Windows Shell's recognized mooInk count before WPD
+            # opens any device. Never silently fall back to Explorer verbs.
+            if len(self.usb_devices()) != 1:
+                raise RuntimeError("靜默 WPD 模式必須僅連接一台 mooInk USB 裝置")
+            from mook_mtp_wpd import backup_and_delete_one
+            return backup_and_delete_one(
+                filename, backup_dir, delete_after=delete_after, progress=progress
+            )
         target = self._target(write=True)
         found = [x for x in self.list_sleep() if x["name"] == filename]
         if not found:
@@ -621,7 +632,8 @@ class SleepScreenManager:
 
     def manage(self, files=None, operation="list", backup_dir="mooink_backup",
                *, confirm=True, continue_on_error=False, on_result=None,
-               on_stage=None, backup_timeout=None, stop_on_mtp_stall=False):
+               on_stage=None, backup_timeout=None, stop_on_mtp_stall=False,
+               quiet_wpd=False):
         """Manage sleep files. Batch deletion can report every file separately.
 
         continue_on_error=True returns a list of records:
@@ -706,6 +718,8 @@ class SleepScreenManager:
                         options["progress"] = emit
                     if backup_timeout is not None:
                         options["backup_timeout"] = float(backup_timeout)
+                    if quiet_wpd:
+                        options["quiet_wpd"] = True
                     detail = str(self.io.backup_and_delete(
                         name, Path(backup_dir), confirm_delete=confirm, **options))
                     if detail.startswith("deleted+verified;"):
@@ -729,6 +743,11 @@ class SleepScreenManager:
                         "detail": type(exc).__name__ + ": " + str(exc),
                     }
                 except Exception as exc:
+                    # A missing direct-WPD backend or ambiguous device
+                    # identity is systemic, not an independent per-file error.
+                    from mook_mtp_wpd import QuietMtpUnavailable
+                    if stop_on_mtp_stall and isinstance(exc, QuietMtpUnavailable):
+                        blocked_reason = str(exc)
                     record = {
                         "name": name, "status": "failed",
                         "detail": type(exc).__name__ + ": " + str(exc),
