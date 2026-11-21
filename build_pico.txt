@@ -1,0 +1,23 @@
+env:
+	sudo apt update
+	sudo apt install -y git cmake ninja-build gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib libusb-1.0-0-dev
+
+build cmd:
+	bash pico2w_usb2bluetooth/build_wsl.sh
+
+output:
+	pico2w_usb2bluetooth/build/pico2w_usb2bluetooth.uf2
+	
+update fw:
+	拔掉pico, 長壓pico電源鍵不放, 插入usb, 檔案總管可以看到一個usb disk
+	複製pico2w_usb2bluetooth.uf2到這個usb disk, 複製完成usb disk會自動退出
+	
+usage:
+	git pull
+	python -m pip install pyserial
+	配對介面: python pico2w_usb2bluetooth.py
+	命令列喚醒: python pico2w_usb2bluetooth.py --port COM6 wake --key f12 --wait 20
+	當做模組, 被其他py呼叫:
+		from pico2w_usb2bluetooth import PicoKeyboard
+		with PicoKeyboard("COM6") as keyboard:
+		keyboard.wake(key="f12", wait=20)
