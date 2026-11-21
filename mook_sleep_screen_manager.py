@@ -234,7 +234,11 @@ class MooinkLowLevel:
         backup_dir.mkdir(parents=True, exist_ok=True)
         backup = backup_dir / filename
         if backup.exists():
-            backup = backup_dir / (datetime.now().strftime('%Y%m%d_%H%M%S_') + filename)
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            counter = 1
+            while backup.exists():
+                backup = backup_dir / ("%s_%03d_%s" % (stamp, counter, filename))
+                counter += 1
         if isinstance(target, Path):
             src = target / filename
             shutil.copy2(src, backup)
@@ -260,7 +264,11 @@ class MooinkLowLevel:
                 break
             time.sleep(0.8)
         else:
-            raise RuntimeError("USB MTP 備份未完成或大小不符；不刪除原檔")
+            local_size = backup.stat().st_size if backup.exists() else "未產生檔案"
+            expected = src_size if src_size is not None else "裝置未提供"
+            raise RuntimeError(
+                "USB MTP 備份未完成或大小不符；不刪除原檔"
+                "（裝置檔案大小=%s，本機備份大小=%s）" % (expected, local_size))
         if confirm_delete and not question("確定刪除 mooInk 的 %s？已備份到 %s" % (filename, backup)):
             return "cancelled-after-backup: " + str(backup)
         item.InvokeVerb("delete")
