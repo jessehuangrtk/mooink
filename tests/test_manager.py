@@ -105,5 +105,104 @@ class MooinkManagerTests(unittest.TestCase):
             SleepScreenManager(size="9.7")
 
 
+class BatchDeleteTests(unittest.TestCase):
+    def test_failure_is_skipped_and_next_file_deleted_with_verified_backup(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            device = root / "sleep"
+            device.mkdir()
+            backup_dir = root / "backup"
+            (device / "bad.jpg").write_bytes(b"original-bad")
+            (device / "good.jpg").write_bytes(b"original-good")
+            real_copy = shutil.copy2
+            events = []
+
+            def copy_spy(src, dst, *args, **kwargs):
+                events.append(("copy", Path(src).name))
+                if Path(src).name == "bad.jpg":
+                    raise OSError("simulated backup failure")
+                return real_copy(src, dst, *args, **kwargs)
+
+            def progress(index, total, record):
+                events.append(("progress", index, record["status"]))
+
+            io = MooinkLowLevel(transport="wifi", wifi_share=str(device))
+            manager = SleepScreenManager(output_dir=str(root / "prepared"), io_layer=io)
+            with patch("mook_sleep_screen_manager.shutil.copy2", side_effect=copy_spy):
+                rows = manager.manage(
+                    files=["bad.jpg", "good.jpg"], operation="delete",
+                    backup_dir=str(backup_dir), confirm=False,
+                    continue_on_error=True, on_result=progress,
+                )
+            self.assertEqual([x["status"] for x in rows], ["failed", "deleted"])
+            self.assertEqual([x["name"] for x in rows], ["bad.jpg", "good.jpg"])
+            self.assertTrue((device / "bad.jpg").exists(), "Never delete a file whose backup failed")
+            self.assertFalse((device / "good.jpg").exists())
+            self.assertEqual((backup_dir / "good.jpg").read_bytes(), b"original-good")
+            self.assertEqual(events, [
+                ("copy", "bad.jpg"), ("progress", 1, "failed"),
+                ("copy", "good.jpg"), ("progress", 2, "deleted"),
+            ])
+
+    def test_mtp_delete_request_marked_pending_not_success(self):
+        class FakeMtp:
+            def backup_and_delete(self, name, directory, *, confirm_delete=True):
+                return "Windows Shell delete requested; verify manually; backup: " + name
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = SleepScreenManager(output_dir=tmp, io_layer=FakeMtp())
+            rows = manager.manage(
+                files=["one.jpg", "two.png"], operation="delete",
+                backup_dir=tmp, confirm=False, continue_on_error=True,
+            )
+        self.assertEqual([x["status"] for x in rows], ["pending", "pending"])
+
+    def test_failure_and_skipped_status_do_not_stop_batch(self):
+        class FakeMixed:
+            def __init__(self):
+                self.visited = []
+
+            def backup_and_delete(self, name, directory, *, confirm_delete=True):
+                self.visited.append(name)
+                if name == "a.jpg":
+                    raise RuntimeError("USB MTP 備份未完成或大小不符；不刪除原檔")
+                if name == "b.jpg":
+                    return "cancelled-after-backup: C:\\backup\\b.jpg"
+                return "Windows Shell delete requested; verify manually; backup: c.jpg"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            io = FakeMixed()
+            manager = SleepScreenManager(output_dir=tmp, io_layer=io)
+            rows = manager.manage(
+                files=["a.jpg", "b.jpg", "c.jpg"], operation="delete",
+                backup_dir=tmp, confirm=False, continue_on_error=True,
+            )
+        self.assertEqual(io.visited, ["a.jpg", "b.jpg", "c.jpg"])
+        self.assertEqual([x["status"] for x in rows], ["failed", "skipped", "pending"])
+        self.assertIn("備份未完成", rows[0]["detail"])
+
+    def test_progress_callback_error_does_not_repeat_deletion(self):
+        class FakeDevice:
+            def __init__(self):
+                self.visited = []
+
+            def backup_and_delete(self, name, directory, *, confirm_delete=True):
+                self.visited.append(name)
+                return "Windows Shell delete requested; verify manually"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            io = FakeDevice()
+            manager = SleepScreenManager(output_dir=tmp, io_layer=io)
+            rows = manager.manage(
+                files=["1.jpg", "2.jpg"], operation="delete", confirm=False,
+                continue_on_error=True, on_result=lambda *args: 1 / 0,
+            )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(io.visited, ["1.jpg", "2.jpg"])
+
+
+
+
 if __name__ == "__main__":
     unittest.main()
