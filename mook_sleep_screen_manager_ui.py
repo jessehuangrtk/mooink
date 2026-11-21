@@ -228,7 +228,7 @@ class MooinkSleepUI:
         controls.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         ttk.Button(controls, text="讀取圖片清單", command=self._list_sleep).pack(side="left")
         ttk.Button(controls, text="選擇 JPG / PNG 上傳", command=self._upload).pack(side="left", padx=8)
-        ttk.Button(controls, text="備份並刪除選取", command=self._delete).pack(side="left")
+        ttk.Button(controls, text="備份並刪除選取（一次確認）", command=self._delete).pack(side="left")
         ttk.Button(controls, text="單張備份測試（不刪除）", command=self._backup_test).pack(side="left", padx=(7, 0))
         ttk.Label(controls, text="單張備份逾時").pack(side="left", padx=(18, 4))
         ttk.Combobox(
@@ -254,7 +254,7 @@ class MooinkSleepUI:
                   style="Subtitle.TLabel").grid(row=4, column=0, sticky="w")
         ttk.Label(
             transfer, style="Subtitle.TLabel",
-            text="整批進度按已處理張數計算；單檔傳輸進度僅能依本機已出現的備份大小估計。",
+            text="USB 批次刪除改用直接 WPD（需另裝套件），整批只確認一次，不呼叫檔案總管逐張確認。",
         ).grid(row=5, column=0, sticky="w", pady=(3, 0))
 
         tree_frame = ttk.Frame(storage)
@@ -771,12 +771,14 @@ class MooinkSleepUI:
             messagebox.showwarning("未指定備份目錄", "請指定本機備份目錄。")
             return
         if not messagebox.askyesno(
-            "確認備份並刪除",
-            "將逐張執行：備份 → 驗證 → 刪除，再處理下一張。\n"
+            "整批只確認一次｜備份並刪除",
+            "這是整批唯一的程式確認視窗。\n"
+            "將逐張執行：備份 → 驗證 → WPD 直接刪除，再處理下一張。\n"
             "一般單張失敗會跳過；若 Windows MTP 缺少來源大小、複製無法開始，"
             "或刪除無法確認，為避免空轉／誤操作，會停止本次剩餘檔案。\n"
             "建議先執行「單張備份測試（不刪除）」。\n"
-            "MTP 刪除命令送出後仍須確認。\n\n共 %d 張：\n%s\n\n確定繼續？" %
+            "WPD 未安裝或無法唯一確認 mooInk 時會安全停止，不會退回逐張跳窗。\n\n"
+            "共 %d 張：\n%s\n\n確定繼續？" %
             (len(names), "\n".join(names[:10]) + ("\n…" if len(names) > 10 else "")),
         ):
             return
@@ -803,6 +805,7 @@ class MooinkSleepUI:
                 confirm=False, continue_on_error=True, on_result=progress,
                 on_stage=stage, backup_timeout=max_wait,
                 stop_on_mtp_stall=True,
+                quiet_wpd=(current["transport"] == "usb"),
             )
 
         def done(result):
@@ -832,7 +835,7 @@ class MooinkSleepUI:
         lines = [summary, "",
                  "每張均先備份驗證，成功才會送出該張的刪除要求。",
                  "USB MTP 的刪除可能非同步；請重新讀取 sleep 清單確認。",
-                 "MTP 複製無法啟動或刪除無法確認時，會停止剩餘圖片以避免空轉。", ""]
+                 "USB 直接 WPD 刪除不彈逐張確認；裝置不明或刪除無法確認時將停止批次。", ""]
         for index, row in enumerate(records, 1):
             lines.append("%03d. [%s] %s" %
                          (index, labels.get(row["status"], row["status"]), row["name"]))
