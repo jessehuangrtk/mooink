@@ -53,3 +53,22 @@ The test used an earlier example IP before the actual LAN IP was found; any form
 Sony sources: https://helpguide.sony.net/dpt/rp1/v1/en/contents/TP0001178278.html and https://helpguide.sony.net/dpt/rp1/v1/en/contents/TP0001178333.html
 
 Open-source client: https://github.com/janten/dpt-rp1-py
+
+## Sleeping-device HTTPS authentication finding (2026-11-21)
+
+The user ran while the original mooInk Pro remained asleep:
+
+```
+curl.exe -k -s -o NUL -w "HTTP %{http_code}\\n" --max-time 5 https://192.168.1.137:8443/system/status/battery
+# HTTP 401
+```
+
+This is a server-side **unauthorized** response: the service is alive and reached the request, but the user has not authenticated. It **does not prove** the target GET route will succeed after authentication, nor that a wake/sleep/display command exists.
+
+Verified in the current upstream `janten/dpt-rp1-py` source (dptrp1/dptrp1.py and CLI):
+- Sony-compatible authenticated API uses port 8443, with private key / client ID and per-session signed nonce; a cookie named Credentials is set after `PUT /auth`.
+- The CLI command `dptrp1 --addr 192.168.1.137 list-documents` will look for existing credentials and only then authenticate. It is a useful read-only validation command **once the account has been paired**.
+- `dptrp1 --addr 192.168.1.137 register` initiates a **state-changing interactive pairing sequence**: it first performs `PUT /register/cleanup`, then POSTs for PIN registration and saves credentials. Do not describe this command as read-only, and never share the generated private key / client ID in logs or chat.
+- Only after successful pairing should a read-only `dptrp1 --addr 192.168.1.137 list-documents` or `get-configuration` be attempted. No immediate wake/sleep API has been validated.
+
+Source: https://github.com/janten/dpt-rp1-py
