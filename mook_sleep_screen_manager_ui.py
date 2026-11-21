@@ -44,6 +44,7 @@ class MooinkSleepUI:
         self._inputs: list[str] = []
         self._converted: list[Path] = []
         self._device_names: list[str] = []
+        self._sleep_identity = None  # Connection/settings used for displayed list.
         self._preview_path: Path | None = None
         self._preview_photo = None
         self._busy = False
@@ -51,6 +52,7 @@ class MooinkSleepUI:
 
         self._style()
         self._build()
+        self.wifi_share.trace_add("write", lambda *_args: self._invalidate_sleep())
         self.root.after(100, self._drain)
         self._log("UI 已啟動；所有裝置檔案操作由 mook_sleep_screen_manager.py 執行。")
 
@@ -177,13 +179,16 @@ class MooinkSleepUI:
         conn.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         first = ttk.Frame(conn)
         first.pack(fill="x")
-        ttk.Radiobutton(first, text="USB MTP（Windows）", variable=self.transport, value="usb").pack(side="left")
-        ttk.Radiobutton(first, text="已掛載 Wi-Fi sleep 共享目錄", variable=self.transport, value="wifi").pack(side="left", padx=24)
+        ttk.Radiobutton(first, text="USB MTP（Windows）", variable=self.transport, value="usb",
+                        command=self._invalidate_sleep).pack(side="left")
+        ttk.Radiobutton(first, text="已掛載 Wi-Fi sleep 共享目錄", variable=self.transport, value="wifi",
+                        command=self._invalidate_sleep).pack(side="left", padx=24)
         second = ttk.Frame(conn)
         second.pack(fill="x", pady=(10, 0))
         ttk.Label(second, text="USB 裝置").pack(side="left")
         self.device_combo = ttk.Combobox(second, state="readonly", width=45)
         self.device_combo.pack(side="left", padx=8, fill="x", expand=True)
+        self.device_combo.bind("<<ComboboxSelected>>", self._invalidate_sleep)
         ttk.Button(second, text="重新搜尋", command=self._refresh_devices).pack(side="left")
         iprow = ttk.Frame(conn)
         iprow.pack(fill="x", pady=(8, 0))
@@ -402,6 +407,7 @@ class MooinkSleepUI:
             return self._com_call(io.usb_devices)
 
         def done(names):
+            self._invalidate_sleep()
             self._device_names = list(names)
             labels = ["%d. %s" % (i + 1, name) for i, name in enumerate(names)]
             self.device_combo["values"] = labels
@@ -443,8 +449,29 @@ class MooinkSleepUI:
 
         self._task(title, work, done)
 
+    def _invalidate_sleep(self, _event=None, *_args):
+        """Never keep deletable rows from a different USB selection/share."""
+        self._sleep_identity = None
+        for item in self.sleep_tree.get_children():
+            self.sleep_tree.delete(item)
+
     def _list_sleep(self):
+        try:
+            expected = self._transport_snapshot()
+        except ValueError as exc:
+            messagebox.showwarning("裝置尚未設定", str(exc))
+            return
+
         def done(rows):
+            try:
+                now = self._transport_snapshot()
+            except ValueError:
+                now = None
+            if now != expected:
+                self._invalidate_sleep()
+                self._log("連線設定已變更；捨棄過期的 sleep 清單。")
+                return
+            self._sleep_identity = expected
             self._replace_sleep(rows)
             self._log("讀取到 %d 張 sleep 圖片。" % len(rows))
         self._device_job("讀取 sleep 圖片", lambda io: io.list_sleep(), done)
@@ -484,6 +511,14 @@ class MooinkSleepUI:
         self._device_job("新增 sleep 圖片", operation, done, writing=True)
 
     def _delete(self):
+        try:
+            current = self._transport_snapshot()
+        except ValueError as exc:
+            messagebox.showwarning("裝置尚未設定", str(exc))
+            return
+        if self._sleep_identity is None or current != self._sleep_identity:
+            messagebox.showwarning("請重新讀取清單", "裝置設定已變更或清單尚未讀取；請先重新讀取 sleep 圖片。")
+            return
         selected = self.sleep_tree.selection()
         if not selected:
             messagebox.showinfo("未選取圖片", "請先選擇 sleep 清單中需要備份與刪除的檔案。")
