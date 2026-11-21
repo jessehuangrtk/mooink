@@ -228,6 +228,7 @@ class MooinkSleepUI:
         ttk.Button(controls, text="讀取圖片清單", command=self._list_sleep).pack(side="left")
         ttk.Button(controls, text="選擇 JPG / PNG 上傳", command=self._upload).pack(side="left", padx=8)
         ttk.Button(controls, text="備份並刪除選取", command=self._delete).pack(side="left")
+        ttk.Button(controls, text="單張備份測試（不刪除）", command=self._backup_test).pack(side="left", padx=(7, 0))
         ttk.Label(controls, text="單張備份逾時").pack(side="left", padx=(18, 4))
         ttk.Combobox(
             controls, textvariable=self.backup_timeout, state="readonly",
@@ -355,6 +356,7 @@ class MooinkSleepUI:
                     labels = {
                         "deleted": "已刪除", "pending": "刪除待確認",
                         "skipped": "已跳過", "failed": "失敗／待檢查",
+                        "blocked": "前一檔發生系統性問題，未執行",
                     }
                     row = info["record"]
                     label = labels.get(row["status"], row["status"])
@@ -367,7 +369,7 @@ class MooinkSleepUI:
                     self._log("第 %d/%d 張：%s → %s" %
                               (info["index"], info["total"], row["name"], label))
                     continue
-                if title == "備份並刪除":
+                if title in ("備份並刪除", "備份測試"):
                     self._end_backup_progress()
                 self._busy = False
                 self.progress.stop()
@@ -412,13 +414,15 @@ class MooinkSleepUI:
         if changed:
             self._backup_stage_start = time.monotonic()
             self._backup_current = (name, index, phase)
-            if phase in ("locate", "copying", "verifying", "deleting", "pending",
+            if phase in ("locate", "backup_target", "copying", "verifying", "deleting",
+                         "pending", "blocked", "verified",
                          "deleted", "failed", "skipped"):
                 self._log("第 %d/%d 張 %s：%s" %
                           (index, info["total"], name, row.get("message", phase)))
 
         labels = {
             "locate": "尋找圖片／準備備份",
+            "backup_target": "本機備份位置已確認",
             "copying": "備份中（等待 MTP）",
             "verifying": "正在驗證備份",
             "deleting": "送出刪除命令",
@@ -426,6 +430,8 @@ class MooinkSleepUI:
             "deleted": "已確認刪除",
             "failed": "失敗／需檢查原檔與備份（本次不重試）",
             "skipped": "已跳過",
+            "blocked": "前一檔發生系統性問題，未執行",
+            "verified": "單張備份驗證完成（原檔保留）",
         }
         phase_label = labels.get(phase, phase)
         copied = row.get("copied")
@@ -444,7 +450,7 @@ class MooinkSleepUI:
                 self.backup_file_bar.configure(mode="indeterminate")
                 self.backup_file_bar.start(12)
                 phase_label += " · 等待本機備份檔案出現"
-        elif phase in ("pending", "deleted", "failed", "skipped"):
+        elif phase in ("pending", "deleted", "failed", "skipped", "blocked", "verified"):
             self.backup_file_bar.stop()
             self.backup_file_bar.configure(mode="determinate", maximum=100)
             self.backup_file_bar["value"] = 100
@@ -661,6 +667,59 @@ class MooinkSleepUI:
 
         self._device_job("新增 sleep 圖片", operation, done, writing=True)
 
+    def _backup_test(self):
+        """Copy one selected sleep image to PC; NEVER issue delete."""
+        if self._busy:
+            messagebox.showinfo("操作進行中", "請先完成目前操作。")
+            return
+        try:
+            current = self._transport_snapshot()
+        except ValueError as exc:
+            messagebox.showwarning("裝置尚未設定", str(exc))
+            return
+        if self._sleep_identity is None or current != self._sleep_identity:
+            messagebox.showwarning("請重新讀取清單", "請先讀取 sleep 圖片清單。")
+            return
+        selected = self.sleep_tree.selection()
+        if len(selected) != 1:
+            messagebox.showinfo("單張備份測試", "請只選取一張圖片。")
+            return
+        name = self.sleep_tree.item(selected[0], "values")[0]
+        back_dir = self.backup_dir.get().strip()
+        if not back_dir:
+            messagebox.showwarning("缺少備份目錄", "請指定本機備份資料夾。")
+            return
+        if not messagebox.askyesno(
+                "單張備份測試", "只複製並檢查 %s 的備份大小，"
+                "不會刪除 mooInk 上的任何檔案。\n\n確認開始？" % name):
+            return
+        wait = int(self.backup_timeout.get())
+
+        def operation(io):
+            def stage(phase, details):
+                event = {"name": name, "stage": phase}
+                event.update(details)
+                self._messages.put(("__delete_stage__", {
+                    "index": 1, "total": 1, "event": event,
+                }, None, None))
+            return io.backup_and_delete(
+                name, Path(back_dir), confirm_delete=False,
+                delete_after=False, progress=stage, backup_timeout=wait,
+            )
+
+        def done(result):
+            self.backup_batch_bar["value"] = 100
+            self.backup_batch_label.set("單張備份測試：1 / 1")
+            self._log("單張備份測試完成：" + result)
+            messagebox.showinfo(
+                "備份測試完成", result +
+                "\n\n僅代表本機備份大小符合裝置回報大小，"
+                "不代表已逐位元組比對。mooInk 原檔未被刪除。"
+            )
+
+        self._device_job("備份測試", operation, done, writing=True,
+                         backup_batch=(1, wait))
+
     def _delete(self):
         try:
             current = self._transport_snapshot()
@@ -682,7 +741,9 @@ class MooinkSleepUI:
         if not messagebox.askyesno(
             "確認備份並刪除",
             "將逐張執行：備份 → 驗證 → 刪除，再處理下一張。\n"
-            "單張失敗會跳過，不影響後續圖片；結束時列出完整結果。\n"
+            "一般單張失敗會跳過；若 Windows MTP 複製完全沒啟動，"
+            "或刪除無法確認，為避免空轉／誤操作，會停止本次剩餘檔案。\n"
+            "建議先執行「單張備份測試（不刪除）」。\n"
             "MTP 刪除命令送出後仍須確認。\n\n共 %d 張：\n%s\n\n確定繼續？" %
             (len(names), "\n".join(names[:10]) + ("\n…" if len(names) > 10 else "")),
         ):
@@ -709,6 +770,7 @@ class MooinkSleepUI:
                 files=names, operation="delete", backup_dir=back_dir,
                 confirm=False, continue_on_error=True, on_result=progress,
                 on_stage=stage, backup_timeout=max_wait,
+                stop_on_mtp_stall=True,
             )
 
         def done(result):
@@ -728,16 +790,17 @@ class MooinkSleepUI:
             "pending": "刪除已要求，待確認",
             "skipped": "已跳過",
             "failed": "失敗／需檢查",
+            "blocked": "前一檔故障，未執行",
         }
         counts = {key: sum(row["status"] == key for row in records)
                   for key in labels}
-        summary = ("共 %d 張｜已確認刪除 %d｜待確認 %d｜跳過 %d｜失敗 %d" %
+        summary = ("共 %d 張｜已確認刪除 %d｜待確認 %d｜跳過 %d｜失敗 %d｜未執行 %d" %
                    (len(records), counts["deleted"], counts["pending"],
-                    counts["skipped"], counts["failed"]))
+                    counts["skipped"], counts["failed"], counts["blocked"]))
         lines = [summary, "",
                  "每張均先備份驗證，成功才會送出該張的刪除要求。",
                  "USB MTP 的刪除可能非同步；請重新讀取 sleep 清單確認。",
-                 "失敗檔案不再自動重試，避免重複操作。", ""]
+                 "MTP 複製無法啟動或刪除無法確認時，會停止剩餘圖片以避免空轉。", ""]
         for index, row in enumerate(records, 1):
             lines.append("%03d. [%s] %s" %
                          (index, labels.get(row["status"], row["status"]), row["name"]))
