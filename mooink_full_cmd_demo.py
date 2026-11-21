@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""mooInk Pro Full Command Demo v1.1 (Windows / Python 3.9+).
+"""mooInk Pro Full Command Demo v1.1.1 (Windows / Python 3.9+).
 
 ONE-FILE tool. Works with multiple first-generation mooInk Pro readers.
 No device serial, registration client ID, or IP address is hardcoded.
@@ -8,8 +8,10 @@ No device serial, registration client ID, or IP address is hardcoded.
 Stages: dynamic USB discovery, optional Windows WPD/MTP metadata inspection,
 LAN mDNS discovery/manual IP, awake/sleep network tests, authenticated Sony
 Digital Paper API, document display tests with human observation, and guided
-USB-MTP sleep-image test. Real wake/sleep is not proven: this tool records
-what the USER actually observes instead of assuming a command wakes hardware.
+USB-MTP sleep-image test. Direct Wi-Fi/API wake and immediate standby remain
+unproven. The user has manually confirmed Bluetooth keyboard wake, but not
+Bluetooth mouse wake, and a selectable 15-second automatic standby timeout.
+These Bluetooth observations are informational only, not automated tests.
 
 Install: python -m pip install dpt-rp1-py comtypes
 Run:     python mooink_full_cmd_demo.py --ip 192.168.1.137
@@ -969,7 +971,7 @@ def stage_sleep_image(rec, reader, usb):
     pause("請再次短按電源鍵讓閱讀器休眠，再按 Enter：")
     refreshed = observation("新的休眠圖是否出現在電子紙上？")
     rec.event(reader, "sleep_image_after_wake_sleep", refreshed)
-    print("這是人工重現，不代表已找到遠端喚醒或立即休眠命令。")
+    print("這是人工重現，不代表已找到 Wi-Fi/API 直接喚醒或立即休眠命令。")
 
 
 def run_reader(rec, args, usb):
@@ -1007,7 +1009,22 @@ def run_reader(rec, args, usb):
 # ===== Full Command Demo (auto diagnostic + interactive observations) =====
 # To add newly discovered commands, append an entry to READ_ONLY_COMMANDS
 # or implement a separate gated test if an operation can alter device state.
-DEMO_VERSION = "1.1.0"
+DEMO_VERSION = "1.1.1"
+
+# User-reported physical observations, not results of this demo invocation.
+# The exact tested model, firmware, key and sleep duration were not specified.
+BLUETOOTH_WAKE_NOTES = (
+    "使用者實機回報：已配對的藍牙鍵盤可以喚醒 mooInk。",
+    "使用者實機回報：藍牙滑鼠無法喚醒 mooInk。",
+    "系統可手動設定 15 秒自動休眠。",
+    "未來可嘗試 Raspberry Pi 5 模擬 Bluetooth HID 鍵盤，"
+    "更新 sleep 圖片後送出按鍵喚醒，再等待 15 秒自動休眠。",
+    "仍待確認：長時間休眠後能否喚醒、USB 連接時能否自動休眠、"
+    "再次休眠是否顯示新圖，以及不同型號／韌體的相容性。",
+    "本 Demo 僅記錄文字，不實作藍牙配對、按鍵發送、"
+    "修改休眠設定或自動刷新；Wi-Fi/API 直接喚醒仍未證實。",
+)
+
 READ_ONLY_COMMANDS = (
     ("ping", "/ping", "驗證目前的授權連線"),
     ("battery", "/system/status/battery", "讀取電池狀態"),
@@ -1026,6 +1043,10 @@ class DemoRecorder(Recorder):
         super().__init__(output_dir)
         self.report["tool"] = "mooInk Full Command Demo " + DEMO_VERSION
         self.report["purpose"] = "Describe every safe read and manually observed display test."
+        self.report["bluetooth_wake_notes"] = {
+            "source": "user-reported physical observations; not tested by this run",
+            "notes": list(BLUETOOTH_WAKE_NOTES),
+        }
         stem = datetime.now().strftime("mooink_full_cmd_demo_%Y%m%d_%H%M%S_%f")
         self.file = self.output_dir / (stem + ".json")
         self.text_file = self.output_dir / (stem + ".txt")
@@ -1040,7 +1061,9 @@ class DemoRecorder(Recorder):
                  "=" * 82,
                  "Started: " + self.report["started_utc"],
                  "Goal: USB/MTP, Sony Wi-Fi API, screen state and sleep-image research",
-                 "Caution: HTTP 2xx != display wake. No remote wake/sleep command was proven.",
+                 "Caution: HTTP 2xx != display wake. Direct Wi-Fi/API wake and immediate standby remain unproven.",
+                 "", "藍牙喚醒研究紀錄（使用者實測回報，非本次 Demo 測試）：",
+                 *BLUETOOTH_WAKE_NOTES,
                  "", "LEGEND: ok=completed, rejected=HTTP non-2xx, skipped=not attempted,",
                  "        observed=yes/no/uncertain from human, not inferred by software."]
         for idx, reader in enumerate(self.report.get("readers", []), 1):
@@ -1253,6 +1276,9 @@ def demo_main(argv=None):
     print("自動展示 USB、WPD、公開 API、授權 API；會改變畫面的操作需人員確認。")
     print("兩台 USB 皆列舉；本次 Wi-Fi 只測命令列指定的 IP，不綁任何固定序號。")
     print("不修改韌體 / USB driver / MTP 檔案 / 休眠時間。")
+    print("\n[藍牙喚醒研究紀錄 — 僅文字說明]")
+    for note in BLUETOOTH_WAKE_NOTES:
+        print("  - " + note)
     rec = DemoRecorder(args.output_dir)
     reader = rec.start_reader("mooInk Wi-Fi " + ip, None)
     reader["lan_ip"] = ip
@@ -1301,7 +1327,8 @@ def demo_main(argv=None):
         else:
             rec.event(reader, "sleep_image", "skipped", reason="--no-physical")
         rec.event(reader, "wake_capability", "not_confirmed",
-                  note="There is no validated direct remote wake or immediate standby command")
+                  note="Direct Wi-Fi/API wake and immediate standby remain unverified. "
+                       "User-reported Bluetooth keyboard wake is documented separately.")
         return 0
     except (StopReader, KeyboardInterrupt, EOFError):
         rec.event(reader, "user_stop", "partial", note="User ended manual portion")
