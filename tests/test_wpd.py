@@ -268,7 +268,7 @@ class UploadWpdTests(unittest.TestCase):
                 result = transport.add_file(path)
             self.assertIn("uploaded+sha256-verified", result)
             direct.assert_called_once()
-            self.assertEqual(direct.call_args.args[0], path)
+            self.assertEqual(direct.call_args.args[0].resolve(), path.resolve())
 
     def test_backend_upload_reports_every_file_and_duplicate_skips(self):
         transport = MooinkLowLevel(transport="usb")
