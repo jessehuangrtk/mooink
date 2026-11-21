@@ -14,16 +14,21 @@
 | [tools/mooink_mtp_inspector_v004.py](tools/mooink_mtp_inspector_v004.py) | 保留已驗證的唯讀 MTP/WPD 研究版本 |
 | [todo.md](todo.md) | 200 項依主題、優先級整理的待驗證與改進事項 |
 
-## Windows 安裝（Python 3.9+）
+## Windows 安裝（GUI Python 3.9+；USB WPD Python 3.10+）
 
-在專案目錄開啟 PowerShell 或 CMD：
+在專案目錄開啟 PowerShell 或 CMD，**用同一個 `python` 執行安裝及啟動**：
 
 ~~~powershell
-py -m pip install -r requirements.txt
-py mook_sleep_screen_manager_ui.py
+git pull
+python -m pip install -r requirements.txt
+python mook_sleep_screen_manager_ui.py
 ~~~
 
-不需要另外下載 UI 框架：Tkinter 一般隨官方 Windows Python 安裝。依賴中 Pillow 用於圖片處理／預覽、PyMuPDF 用於 PDF、pywin32 用於 Windows MTP 與 Office COM。Excel／Word 轉圖片還需要**已安裝的 Microsoft Office 或 LibreOffice**；安裝 Python 套件本身並不包含 Office。
+**不需安裝 `mtp` 套件！** PyPI `mtp==1.1.0`（常見相依套件 `urwid`）並不是此專案使用的 Windows WPD API；先前指引要求 `pip install mtp` 是錯誤的。WPD 原始碼已內建於 `third_party/heribert17_win_access.py`，上游為 [Heribert17/mtp](https://github.com/Heribert17/mtp)，MIT 授權；此專案只需安裝 `comtypes`（已列在 `requirements.txt`）。原來已安裝的 `mtp 1.1.0` 不會被本程式使用，不必為了 mooInk 另行安裝或重複安裝它。
+
+執行記錄會列出 **GUI Python 的完整路徑**；若 USB WPD 無法載入，錯誤會顯示真正的 `comtypes`／Windows DLL／裝置列舉例外，而非一律提示「沒有 mtp」。
+
+不需要另外下載 UI 框架：Tkinter 一般隨官方 Windows Python 安裝。Pillow 用於圖片處理／預覽、PyMuPDF 用於 PDF、pywin32 用於 Windows Shell/Office COM、comtypes 用於直接 WPD。Excel／Word 轉圖片還需要**已安裝的 Microsoft Office 或 LibreOffice**。
 
 如果你需要完整離線安裝，參閱 [docs/OFFLINE_DEPENDENCIES.md](docs/OFFLINE_DEPENDENCIES.md)，並於有網路時先建立對應 Windows/Python 版本的 wheel 備份。
 
@@ -58,16 +63,7 @@ py mook_sleep_screen_manager_ui.py
 
 GUI 的「備份並刪除選取（一次確認）」**只在開始前顯示一次程式確認**。USB 模式改走直接 WPD 介面，不使用會造成 Windows 檔案總管逐張詢問的 `FolderItem.InvokeVerb("delete")`。
 
-**額外安裝一次（Windows、Python 3.10 或更新版）：**
-
-~~~powershell
-py --version
-py -m pip install "git+https://github.com/Heribert17/mtp.git"
-git pull
-py mook_sleep_screen_manager_ui.py
-~~~
-
-這是第三方 MIT 授權的 WPD Python 函式庫；主程式的 Python 3.9 功能維持不變，但這個額外的免逐張詢問功能需要 **Python 3.10+** 及可用的 Windows WPD 驅動。安裝後，先測試一張並保留原始圖片。
+**WPD 模式需求：Windows 10／11、Python 3.10+、comtypes。** 只需執行上方的 `python -m pip install -r requirements.txt`，WPD 程式碼已附在專案內，無需從 GitHub 額外安裝 `mtp`。主程式的其他 Python 3.9 功能維持不變。進行實機刪除前請先測試一張並保留原圖。
 
 **批次流程：** 選取 JPG/PNG → GUI 整批確認一次 → WPD 直接下載第一張 → 比對 WPD 來源與本機大小、解碼備份圖片 → WPD 刪除該張 → 再從裝置重新確認該檔消失 → 才處理下一張。沒有源大小、下載失敗、讀取到兩台匹配的裝置、`sleep` 目錄不唯一，或刪除結果無法確認，都會停止而非冒險刪除其他圖片。
 
@@ -81,11 +77,7 @@ GUI 的 **「選擇 JPG / PNG 上傳」** 使用 `mook_sleep_screen_manager.py` 
 - 逐檔流程：避免同名覆寫 → WPD 寫入 `sleep` → 重新讀取 `sleep` 目錄確認檔案存在 → 從裝置讀回本機暫存 → **SHA-256 比對一致**才標示 `verified`。
 - 全部結束顯示每張的 **已驗證／同名跳過／失敗／未執行**，並重新列出裝置的 `sleep` 圖片。
 - 如果 WPD 連線或識別失敗，不會退回 Windows Shell `CopyHere`。若裝置上傳失敗並留有部分檔案，不會擅自刪除遠端檔案；請重新讀取清單檢查。
-- WPD 函式庫 `Heribert17/mtp` 上游目前以 **Python 3.12+、Windows 10／11** 進行測試。安裝指令：
-  
-  ~~~powershell
-  py -m pip install "git+https://github.com/Heribert17/mtp.git"
-  ~~~
+- 直接 WPD 功能使用**隨專案附帶的 MIT 授權程式**，相依 `comtypes` 由 `requirements.txt` 安裝；不需要 `pip install mtp`。目前只驗證模擬裝置，尚待真實 mooInk 測試。
 
 **驗收限制：** GUI、WPD 傳輸及檔案回讀已有模擬測試，但尚未實機確認你的 mooInk 可接受直接 WPD 上傳。若失敗，將錯誤訊息貼回，不能把「送出命令」誤當成「畫面更新」。即使檔案上傳成功，電子紙也不一定立即重繪休眠畫面。
 
