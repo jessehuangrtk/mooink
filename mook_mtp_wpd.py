@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 from pathlib import Path
 import time
 from datetime import datetime
@@ -26,6 +27,39 @@ from datetime import datetime
 
 class QuietMtpUnavailable(RuntimeError):
     """The direct WPD transport is not ready or cannot identify one reader."""
+
+
+def _get_device_list():
+    """Use the vendored WPD implementation, not the unrelated PyPI 'mtp'.
+
+    The PyPI mtp 1.1.0 package depends on urwid and has no win_access.
+    The upstream Heribert17/mtp GitHub setup.py also currently points at
+    src/ despite placing win_access.py under mtp/, so Git installation
+    cannot be relied upon to provide mtp.win_access.
+    """
+    if os.name != "nt":
+        raise QuietMtpUnavailable("USB WPD 模式僅支援 Windows")
+    if sys.version_info < (3, 10):
+        raise QuietMtpUnavailable(
+            "WPD 後端需要 Python 3.10 以上。GUI 正使用：" + sys.executable
+        )
+    try:
+        from third_party.heribert17_win_access import get_portable_devices
+    except Exception as exc:
+        raise QuietMtpUnavailable(
+            "內建 WPD 模組初始化失敗；不需要再安裝 mtp 套件。"
+            "請在啟動 GUI 的同一個 Python 執行："
+            "python -m pip install -r requirements.txt。"
+            "目前 Python=%s；真正的錯誤=%s: %s" %
+            (sys.executable, type(exc).__name__, exc)
+        ) from exc
+    try:
+        return list(get_portable_devices())
+    except Exception as exc:
+        raise QuietMtpUnavailable(
+            "WPD 裝置列舉失敗；目前 Python=%s，實際錯誤=%s: %s。" %
+            (sys.executable, type(exc).__name__, exc)
+        ) from exc
 
 
 def _report(progress, stage, **fields):
@@ -143,17 +177,7 @@ def backup_and_delete_one(filename, backup_dir, *,
     """
     _report(progress, "locate", message="WPD 搜尋 mooInk 裝置")
     if device_source is None:
-        if os.name != "nt":
-            raise QuietMtpUnavailable("WPD USB 模式僅支援 Windows")
-        try:
-            from mtp.win_access import get_portable_devices
-        except (ImportError, RuntimeError) as exc:
-            raise QuietMtpUnavailable(
-                "缺少 WPD 直接存取套件，無法做到免逐張詢問。"
-                "請在 Python 3.10+ 執行："
-                "py -m pip install git+https://github.com/Heribert17/mtp.git"
-            ) from exc
-        devices = list(get_portable_devices())
+        devices = _get_device_list()
     else:
         devices = list(device_source())
 
@@ -242,16 +266,7 @@ def upload_one(source, *, progress=None, device_source=None):
     _report(progress, "locate", message="WPD 搜尋 mooInk sleep 資料夾")
 
     if device_source is None:
-        if os.name != "nt":
-            raise QuietMtpUnavailable("USB WPD 上傳僅支援 Windows")
-        try:
-            from mtp.win_access import get_portable_devices
-        except (ImportError, RuntimeError) as exc:
-            raise QuietMtpUnavailable(
-                "WPD 上傳需要安裝 mtp 套件；請在 Windows Python 3.12+ 執行 "
-                "py -m pip install git+https://github.com/Heribert17/mtp.git"
-            ) from exc
-        devices = list(get_portable_devices())
+        devices = _get_device_list()
     else:
         devices = list(device_source())
 
@@ -343,15 +358,7 @@ def upload_one(source, *, progress=None, device_source=None):
 def list_images(*, device_source=None):
     """List JPG/PNG files directly from WPD after a verified upload."""
     if device_source is None:
-        if os.name != "nt":
-            raise QuietMtpUnavailable("WPD USB 清單僅支援 Windows")
-        try:
-            from mtp.win_access import get_portable_devices
-        except (ImportError, RuntimeError) as exc:
-            raise QuietMtpUnavailable(
-                "WPD 清單需要安裝 mtp 套件，請安裝並重新啟動 GUI"
-            ) from exc
-        devices = list(get_portable_devices())
+        devices = _get_device_list()
     else:
         devices = list(device_source())
     try:
