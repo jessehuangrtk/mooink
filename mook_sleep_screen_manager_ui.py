@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -41,6 +42,15 @@ class MooinkSleepUI:
         self.device_ip = tk.StringVar()
         self.wifi_share = tk.StringVar()
         self.status = tk.StringVar(value="就緒：先匯入圖片，或連接 USB mooInk。")
+        self.backup_timeout = tk.StringVar(value="50")
+        self.backup_batch_label = tk.StringVar(value="批次進度：尚未開始")
+        self.backup_file_label = tk.StringVar(value="目前檔案：尚未開始")
+        self.backup_elapsed_label = tk.StringVar(value="單張已等待：—")
+        self._backup_active = False
+        self._backup_started = 0.0
+        self._backup_stage_start = 0.0
+        self._backup_current = ("", 0, "")
+        self._backup_wait_limit = 50
         self._inputs: list[str] = []
         self._converted: list[Path] = []
         self._device_names: list[str] = []
@@ -54,6 +64,7 @@ class MooinkSleepUI:
         self._build()
         self.wifi_share.trace_add("write", lambda *_args: self._invalidate_sleep())
         self.root.after(100, self._drain)
+        self.root.after(350, self._backup_tick)
         self._log("UI 已啟動；所有裝置檔案操作由 mook_sleep_screen_manager.py 執行。")
 
     def _style(self):
@@ -210,15 +221,42 @@ class MooinkSleepUI:
 
         storage = ttk.LabelFrame(tab, text="  裝置 sleep 圖片  ", style="Heading.TLabelframe", padding=12)
         storage.grid(row=2, column=0, sticky="nsew")
-        storage.rowconfigure(1, weight=1)
+        storage.rowconfigure(2, weight=1)
         storage.columnconfigure(0, weight=1)
         controls = ttk.Frame(storage)
         controls.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         ttk.Button(controls, text="讀取圖片清單", command=self._list_sleep).pack(side="left")
         ttk.Button(controls, text="選擇 JPG / PNG 上傳", command=self._upload).pack(side="left", padx=8)
         ttk.Button(controls, text="備份並刪除選取", command=self._delete).pack(side="left")
+        ttk.Label(controls, text="單張備份逾時").pack(side="left", padx=(18, 4))
+        ttk.Combobox(
+            controls, textvariable=self.backup_timeout, state="readonly",
+            width=6, values=("15", "30", "50", "90", "120"),
+        ).pack(side="left")
+        ttk.Label(controls, text="秒", style="Subtitle.TLabel").pack(side="left", padx=4)
+
+        transfer = ttk.LabelFrame(storage, text="  備份與刪除 · 即時進度  ", padding=(10, 6))
+        transfer.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        transfer.columnconfigure(0, weight=1)
+        ttk.Label(transfer, textvariable=self.backup_batch_label).grid(
+            row=0, column=0, sticky="w")
+        self.backup_batch_bar = ttk.Progressbar(
+            transfer, mode="determinate", maximum=100, value=0)
+        self.backup_batch_bar.grid(row=1, column=0, sticky="ew", pady=(4, 8))
+        ttk.Label(transfer, textvariable=self.backup_file_label).grid(
+            row=2, column=0, sticky="w")
+        self.backup_file_bar = ttk.Progressbar(
+            transfer, mode="indeterminate", maximum=100)
+        self.backup_file_bar.grid(row=3, column=0, sticky="ew", pady=(4, 6))
+        ttk.Label(transfer, textvariable=self.backup_elapsed_label,
+                  style="Subtitle.TLabel").grid(row=4, column=0, sticky="w")
+        ttk.Label(
+            transfer, style="Subtitle.TLabel",
+            text="整批進度按已處理張數計算；單檔傳輸進度僅能依本機已出現的備份大小估計。",
+        ).grid(row=5, column=0, sticky="w", pady=(3, 0))
+
         tree_frame = ttk.Frame(storage)
-        tree_frame.grid(row=1, column=0, sticky="nsew")
+        tree_frame.grid(row=2, column=0, sticky="nsew")
         self.sleep_tree = ttk.Treeview(tree_frame, columns=("name", "size"), show="headings", selectmode="extended")
         self.sleep_tree.heading("name", text="sleep 內的檔案")
         self.sleep_tree.heading("size", text="大小")
@@ -229,7 +267,7 @@ class MooinkSleepUI:
         self.sleep_tree.configure(yscrollcommand=vbar.set)
         vbar.pack(side="left", fill="y")
         back = ttk.Frame(storage)
-        back.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        back.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         ttk.Label(back, text="備份資料夾").pack(side="left")
         ttk.Entry(back, textvariable=self.backup_dir).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(back, text="瀏覽", command=self._choose_backup).pack(side="left")
@@ -309,6 +347,9 @@ class MooinkSleepUI:
         try:
             while True:
                 title, result, error, callback = self._messages.get_nowait()
+                if title == "__delete_stage__":
+                    self._handle_backup_stage(result)
+                    continue
                 if title == "__delete_progress__":
                     info = result
                     labels = {
@@ -319,9 +360,15 @@ class MooinkSleepUI:
                     label = labels.get(row["status"], row["status"])
                     self.status.set("備份並刪除 %d/%d：%s（%s）" %
                                     (info["index"], info["total"], row["name"], label))
+                    self.backup_batch_bar["value"] = 100 * info["index"] / info["total"]
+                    self.backup_batch_label.set("批次進度：%d / %d（%.0f%%）" %
+                                                (info["index"], info["total"],
+                                                 100 * info["index"] / info["total"]))
                     self._log("第 %d/%d 張：%s → %s" %
                               (info["index"], info["total"], row["name"], label))
                     continue
+                if title == "備份並刪除":
+                    self._end_backup_progress()
                 self._busy = False
                 self.progress.stop()
                 if error:
@@ -340,6 +387,92 @@ class MooinkSleepUI:
         except queue.Empty:
             pass
         self.root.after(100, self._drain)
+
+
+    def _begin_backup_progress(self, count, wait_limit):
+        self._backup_active = True
+        self._backup_started = time.monotonic()
+        self._backup_stage_start = self._backup_started
+        self._backup_current = ("", 0, "")
+        self._backup_wait_limit = wait_limit
+        self.backup_batch_bar["value"] = 0
+        self.backup_batch_label.set("批次進度：0 / %d（0%%）" % count)
+        self.backup_file_label.set("正在準備第一張檔案…")
+        self.backup_elapsed_label.set("單張已等待：0 秒")
+        self.backup_file_bar.configure(mode="indeterminate", maximum=100, value=0)
+        self.backup_file_bar.start(12)
+
+    def _handle_backup_stage(self, info):
+        """Runs only on Tk's main thread; worker submits dictionaries to queue."""
+        row = info["event"]
+        name = row["name"]
+        index = info["index"]
+        phase = row["stage"]
+        changed = (name, index, phase) != self._backup_current
+        if changed:
+            self._backup_stage_start = time.monotonic()
+            self._backup_current = (name, index, phase)
+            if phase in ("locate", "copying", "verifying", "deleting", "pending",
+                         "deleted", "failed", "skipped"):
+                self._log("第 %d/%d 張 %s：%s" %
+                          (index, info["total"], name, row.get("message", phase)))
+
+        labels = {
+            "locate": "尋找圖片／準備備份",
+            "copying": "備份中（等待 MTP）",
+            "verifying": "正在驗證備份",
+            "deleting": "送出刪除命令",
+            "pending": "刪除待確認",
+            "deleted": "已確認刪除",
+            "failed": "備份／刪除失敗，保留原檔並跳過",
+            "skipped": "已跳過",
+        }
+        phase_label = labels.get(phase, phase)
+        copied = row.get("copied")
+        total_bytes = row.get("total")
+        if phase == "copying" and isinstance(total_bytes, (int, float)) and total_bytes > 0:
+            # MTP Shell does not expose transfer progress. Only report bytes
+            # visible in the destination file, never fabricate percentages.
+            bytes_seen = max(0, min(int(copied or 0), int(total_bytes)))
+            if bytes_seen > 0:
+                self.backup_file_bar.stop()
+                self.backup_file_bar.configure(mode="determinate", maximum=100)
+                self.backup_file_bar["value"] = 100 * bytes_seen / total_bytes
+                phase_label += " · 本機觀察 %.1f / %.1f KB" % (
+                    bytes_seen / 1024, total_bytes / 1024)
+            else:
+                self.backup_file_bar.configure(mode="indeterminate")
+                self.backup_file_bar.start(12)
+                phase_label += " · 等待本機備份檔案出現"
+        elif phase in ("pending", "deleted", "failed", "skipped"):
+            self.backup_file_bar.stop()
+            self.backup_file_bar.configure(mode="determinate", maximum=100)
+            self.backup_file_bar["value"] = 100
+        else:
+            self.backup_file_bar.configure(mode="indeterminate")
+            self.backup_file_bar.start(12)
+
+        self.backup_file_label.set(
+            "第 %d/%d 張：%s — %s" % (index, info["total"], name, phase_label))
+        self.status.set("備份並刪除：" + phase_label)
+
+    def _backup_tick(self):
+        # Stays responsive even if Shell.CopyHere blocks in the worker.
+        if self._backup_active:
+            elapsed = int(time.monotonic() - self._backup_started)
+            stage_seconds = int(time.monotonic() - self._backup_stage_start)
+            self.backup_elapsed_label.set(
+                "總經過 %d 秒｜目前階段 %d 秒｜MTP 備份逾時設定 %d 秒/張"
+                % (elapsed, stage_seconds, self._backup_wait_limit))
+        self.root.after(350, self._backup_tick)
+
+    def _end_backup_progress(self):
+        self._backup_active = False
+        self.backup_file_bar.stop()
+        self.backup_file_bar.configure(mode="determinate", maximum=100)
+        self.backup_file_bar["value"] = 100
+        self.backup_elapsed_label.set(
+            "操作已結束；若顯示刪除待確認，請重新讀取裝置清單。")
 
     @staticmethod
     def _com_call(action):
@@ -444,7 +577,10 @@ class MooinkSleepUI:
             raise ValueError("Wi-Fi 檔案管理需要已掛載、且名稱為 sleep 的共享資料夾；只有 IP 不夠。")
         return {"transport": "wifi", "ip": ip, "wifi_share": share}
 
-    def _device_job(self, title, action, done, *, writing=False):
+    def _device_job(self, title, action, done, *, writing=False, backup_batch=None):
+        if self._busy:
+            messagebox.showinfo("操作進行中", "請先完成目前的操作。")
+            return
         try:
             settings = self._transport_snapshot()
         except ValueError as exc:
@@ -460,6 +596,8 @@ class MooinkSleepUI:
                 return action(io)
             return self._com_call(operate) if settings["transport"] == "usb" else operate()
 
+        if backup_batch:
+            self._begin_backup_progress(*backup_batch)
         self._task(title, work, done)
 
     def _invalidate_sleep(self, _event=None, *_args):
@@ -551,9 +689,15 @@ class MooinkSleepUI:
             return
 
         options = self._manager_options()
+        max_wait = int(self.backup_timeout.get())
 
         def operation(io):
             manager = SleepScreenManager(io_layer=io, **options)
+
+            def stage(index, total, event):
+                self._messages.put(("__delete_stage__", {
+                    "index": index, "total": total, "event": event,
+                }, None, None))
 
             def progress(index, total, record):
                 # Worker thread must not update any Tk widget directly.
@@ -564,6 +708,7 @@ class MooinkSleepUI:
             return manager.manage(
                 files=names, operation="delete", backup_dir=back_dir,
                 confirm=False, continue_on_error=True, on_result=progress,
+                on_stage=stage, backup_timeout=max_wait,
             )
 
         def done(result):
@@ -574,7 +719,8 @@ class MooinkSleepUI:
             self._invalidate_sleep()
             self._show_delete_report(result)
 
-        self._device_job("備份並刪除", operation, done, writing=True)
+        self._device_job("備份並刪除", operation, done, writing=True,
+                         backup_batch=(len(names), max_wait))
 
     def _show_delete_report(self, records):
         labels = {
