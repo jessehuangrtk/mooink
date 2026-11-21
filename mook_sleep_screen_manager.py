@@ -352,7 +352,7 @@ class MooinkLowLevel:
             if delete_after:
                 notify("failed", message="MTP 無法取得來源大小；拒絕自動刪除，請先單張備份測試")
                 raise MtpUnknownSizeError(
-                    "USB MTP 的 Size 與 System.Size 都無法取得來源大小，"
+                    "USB MTP 未提供來源大小（Size 與 System.Size 都不可用），"
                     "自動刪除不可驗證；尚未建立任何備份資料夾。"
                     "請使用「單張備份測試（不刪除）」診斷。")
             notify("copying", message="MTP 來源大小未知：只測試複製，絕不刪除")
