@@ -282,5 +282,98 @@ class LiveBackupProgressTests(unittest.TestCase):
 
 
 
+class MtpBackupRegressionTests(unittest.TestCase):
+    def test_duplicate_backup_uses_separate_folder_with_original_filename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup_dir = root / "backup"
+            backup_dir.mkdir()
+            (backup_dir / "repeat.jpg").write_bytes(b"OLD")
+            copied_paths = []
+            deleted = []
+            item = SimpleNamespace(
+                Name="repeat.jpg",
+                InvokeVerb=lambda verb: deleted.append(verb),
+            )
+
+            class FakeLocalFolder:
+                def __init__(self, dest):
+                    self.dest = Path(dest)
+
+                def CopyHere(self, source_item, flags):
+                    actual_path = self.dest / source_item.Name
+                    copied_paths.append(actual_path)
+                    actual_path.write_bytes(b"NEW!")
+
+            io = MooinkLowLevel(transport="usb")
+            io._target = lambda write=False: SimpleNamespace(Items=lambda: [item])
+            io.list_sleep = lambda: [{"name": "repeat.jpg", "size": 4}]
+            io._shell = SimpleNamespace(Namespace=lambda dest: FakeLocalFolder(dest))
+            actual = io.backup_and_delete(
+                "repeat.jpg", backup_dir, delete_after=False,
+                confirm_delete=False, backup_timeout=5,
+            )
+
+            self.assertIn("backup-only-size-verified", actual)
+            self.assertEqual((backup_dir / "repeat.jpg").read_bytes(), b"OLD")
+            self.assertEqual(len(copied_paths), 1)
+            self.assertEqual(copied_paths[0].name, "repeat.jpg")
+            self.assertNotEqual(copied_paths[0].parent, backup_dir)
+            self.assertEqual(copied_paths[0].read_bytes(), b"NEW!")
+            self.assertEqual(deleted, [])
+
+    def test_mtp_copy_not_started_halts_batch_without_deleting_anything(self):
+        from mook_sleep_screen_manager import MtpBackupNotStartedError
+        with tempfile.TemporaryDirectory() as tmp:
+            copied, deleted = [], []
+            item = SimpleNamespace(
+                Name="first.jpg",
+                InvokeVerb=lambda verb: deleted.append(verb),
+            )
+            io = MooinkLowLevel(transport="usb")
+            io._target = lambda write=False: SimpleNamespace(Items=lambda: [item])
+            io.list_sleep = lambda: [{"name": "first.jpg", "size": 100}]
+            io._shell = SimpleNamespace(
+                Namespace=lambda path: SimpleNamespace(
+                    CopyHere=lambda source, flags: copied.append(source.Name)
+                )
+            )
+            manager = SleepScreenManager(output_dir=str(Path(tmp) / "prepared"), io_layer=io)
+            # The first monotonic call constructs the copy deadline (0 + 5);
+            # the second immediately expires it without a five-second sleep.
+            with patch("mook_sleep_screen_manager.time.monotonic", side_effect=[0.0, 8.0]):
+                rows = manager.manage(
+                    files=["first.jpg", "second.jpg", "third.jpg"],
+                    operation="delete", backup_dir=str(Path(tmp) / "backups"),
+                    confirm=False, continue_on_error=True, backup_timeout=5,
+                    stop_on_mtp_stall=True,
+                )
+            self.assertEqual(copied, ["first.jpg"])
+            self.assertEqual(deleted, [])
+            self.assertEqual([x["status"] for x in rows],
+                             ["failed", "blocked", "blocked"])
+            self.assertIn("MtpBackupNotStartedError", rows[0]["detail"])
+
+    def test_mtp_unconfirmed_delete_halts_following_files(self):
+        class Device:
+            transport = "usb"
+            def __init__(self):
+                self.items = []
+            def backup_and_delete(self, name, path, *, confirm_delete=True, **kwargs):
+                self.items.append(name)
+                return "Windows Shell delete requested; verify manually"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Device()
+            manager = SleepScreenManager(io_layer=d, output_dir=tmp)
+            rows = manager.manage(
+                files=["one.jpg", "two.jpg"], operation="delete", backup_dir=tmp,
+                confirm=False, continue_on_error=True, stop_on_mtp_stall=True,
+            )
+            self.assertEqual(d.items, ["one.jpg"])
+            self.assertEqual([x["status"] for x in rows], ["pending", "blocked"])
+
+
+
 if __name__ == "__main__":
     unittest.main()
