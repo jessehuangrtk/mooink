@@ -7,3 +7,21 @@ android_sender/.gradle/
 android_sender/local.properties
 android_sender/app/build/
 *.apk
+
+# User/device secrets, pairing credentials and local reports
+*.pem
+privatekey.dat
+deviceid.dat
+*.p12
+*.pfx
+*.key
+mooink_reports/
+mooink_backup/
+mooink_prepared/
+*.log
+# Wheel bundle is intentionally built/saved privately, not committed as large binaries
+offline_wheelhouse/
+offline_mooink_wheels.zip
+# Generated office and editor artifacts
+~$*
+.DS_Store
