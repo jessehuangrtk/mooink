@@ -89,6 +89,15 @@ class QuietWpdTests(unittest.TestCase):
         with self.assertRaises(QuietMtpUnavailable):
             _choose_device([FakeDevice("mooInk 1"), FakeDevice("mooInk 2")])
 
+    def test_usb_vid_pid_identifies_reader_with_generic_name(self):
+        dev = FakeDevice("Digital Paper")
+        dev._p_id = r"\\?\USB#VID_1F85&PID_4E16#UNIT123"
+        self.assertIs(_choose_device([dev]), dev)
+        other = FakeDevice("Other MTP")
+        other._p_id = r"\\?\USB#VID_0001&PID_0002#OTHER"
+        with self.assertRaises(QuietMtpUnavailable):
+            _choose_device([other])
+
     def test_one_sleep_directory_required(self):
         dev, sleep, _ = make_device(png_data())
         self.assertIs(_sleep_directory(dev), sleep)
