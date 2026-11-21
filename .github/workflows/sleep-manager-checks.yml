@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.13"]
+        python-version: ["3.9", "3.13", "3.14"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,7 +30,7 @@ jobs:
         run: python -m pip install "Pillow>=10,<13"
 
       - name: Install WPD dependency and smoke-test bundled transport
-        if: matrix.python-version == '3.13'
+        if: matrix.python-version != '3.9'
         run: |
           python -m pip install "comtypes>=1.4.11"
           python -c "from third_party.heribert17_win_access import get_portable_devices; print('Bundled WPD transport imported successfully')"
