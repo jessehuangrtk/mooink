@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mooInk Mirror Viewer（實驗性）</title>
+<style>
+html,body { margin:0; padding:0; background:#fff; color:#111; font:16px system-ui,Arial,sans-serif; height:100%; }
+header { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:8px 12px; background:#eee; border-bottom:1px solid #555; }
+button,select { font-size:15px; padding:5px 8px; color:#111; background:white; border:1px solid #777; border-radius:4px; }
+button { cursor:pointer; }
+small { color:#555; }
+#viewport { display:flex; width:100%; height:calc(100vh - 56px); align-items:center; justify-content:center; overflow:hidden; }
+#frame { display:block; max-width:100%; max-height:100%; object-fit:contain; image-rendering:auto; }
+.inverted { filter:invert(1); }
+#placeholder { text-align:center; padding:20px; }
+@media (max-width:640px) { header { gap:4px; padding:4px; } #viewport {height:calc(100vh - 88px);} }
+</style>
+</head>
+<body>
+<header>
+  <strong>mooInk Mirror</strong>
+  <button id="toggle" type="button">暫停</button>
+  <button id="refresh" type="button">刷新</button>
+  <button id="invert" type="button">黑白反轉</button>
+  <label>更新 <select id="interval"><option value="500">0.5 秒</option><option value="1000" selected>1 秒</option><option value="2000">2 秒</option><option value="5000">5 秒</option></select></label>
+  <button id="full" type="button">全螢幕</button>
+  <small id="status">等待影像…</small>
+</header>
+<main id="viewport">
+  <div id="placeholder">等待 Windows / Android 傳送畫面…</div>
+  <img id="frame" alt="鏡像畫面" style="display:none">
+</main>
+<script>
+(function() {
+  var query = location.search.slice(1).split("&"), token = "";
+  for (var i=0;i<query.length;i++) {
+    var pair=query[i].split("=");
+    if (pair[0]==="token") { token=decodeURIComponent(pair.slice(1).join("=")); break; }
+  }
+  var suffix = "?token=" + encodeURIComponent(token);
+  var shown = -1, running = true, busy=false;
+  var image = document.getElementById("frame");
+  var status = document.getElementById("status");
+  var interval = document.getElementById("interval");
+  function request(path, callback) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", path + (path.indexOf("?")>=0 ? "&" : "?") + "rnd=" + Date.now(), true);
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState === 4) callback(xhr.status, xhr.responseText);
+    };
+    xhr.onerror=function(){ callback(0, ""); };
+    xhr.send();
+  }
+  function poll() {
+    if (!running || busy) return;
+    busy = true;
+    request("/api/status" + suffix, function(code, text) {
+      busy=false;
+      if (code !== 200) { status.textContent="連線失敗（HTTP " + code + "）"; return; }
+      try {
+        var data=JSON.parse(text);
+        if (!data.has_frame) { status.textContent="尚無畫面"; return; }
+        status.textContent="畫面 #" + data.seq + "，" + Math.ceil(data.bytes/1024) + " KiB";
+        if (shown !== data.seq) {
+          shown = data.seq;
+          image.src="/frame.jpg" + suffix + "&seq=" + data.seq;
+        }
+      } catch(e) { status.textContent="狀態解析失敗"; }
+    });
+  }
+  image.onload = function() {
+    image.style.display="block";
+    document.getElementById("placeholder").style.display="none";
+  };
+  image.onerror = function() { status.textContent="JPEG 顯示失敗"; };
+  document.getElementById("toggle").onclick=function() {
+    running=!running;
+    this.textContent=running ? "暫停" : "繼續";
+    if (running) poll();
+  };
+  document.getElementById("refresh").onclick=function(){ shown=-1; poll(); };
+  document.getElementById("invert").onclick=function(){
+    image.className=image.className ? "" : "inverted";
+  };
+  document.getElementById("full").onclick=function(){
+    var el=document.getElementById("viewport");
+    if (el.requestFullscreen) el.requestFullscreen();
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  };
+  function schedule() {
+    poll();
+    setTimeout(schedule, Math.max(500, Number(interval.value)||1000));
+  }
+  schedule();
+})();
+</script>
+</body>
+</html>
