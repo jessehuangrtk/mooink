@@ -223,7 +223,23 @@ class MooinkLowLevel:
             time.sleep(0.8)
         return "copy-requested-verification-pending"
 
-    def backup_and_delete(self, filename: str, backup_dir: Path, *, confirm_delete=True):
+    def backup_and_delete(self, filename: str, backup_dir: Path, *,
+                          confirm_delete=True, progress=None, backup_timeout=50.0):
+        """Back up one file and verify before requesting deletion.
+
+        MTP CopyHere has no true byte-progress API. progress(stage, details)
+        receives observed local backup bytes, not a guaranteed transfer rate.
+        Errors never trigger deletion. Caller may supply a non-Tk callback.
+        """
+        def notify(stage, **details):
+            if progress is not None:
+                try:
+                    progress(stage, details)
+                except Exception:
+                    # Progress presentation cannot change delete safety.
+                    pass
+
+        notify("locate", message="確認裝置及圖片")
         if Path(filename).name != filename or Path(filename).suffix.lower() not in OUTPUT_EXTS:
             raise ValueError("只能刪除 sleep 根目錄下的 JPG/PNG，且不可使用路徑")
         target = self._target(write=True)
@@ -241,38 +257,72 @@ class MooinkLowLevel:
                 counter += 1
         if isinstance(target, Path):
             src = target / filename
+            expected_size = src.stat().st_size
+            notify("copying", message="複製共享資料夾圖片", copied=0, total=expected_size)
             shutil.copy2(src, backup)
+            notify("verifying", message="確認備份大小", copied=backup.stat().st_size,
+                   total=expected_size)
             if not backup.exists() or backup.stat().st_size != src.stat().st_size:
                 raise RuntimeError("備份驗證失敗，拒絕刪除")
+            notify("deleting", message="備份已驗證，正在刪除")
             src.unlink()
             if src.exists():
                 raise RuntimeError("共享資料夾刪除結果未確認，請手動檢查；備份已保留：" + str(backup))
+            notify("deleted", message="已確認刪除")
             return "deleted+verified; backup: " + str(backup)
-        # Windows MTP Shell manages the actual delete. It may show UI.
+
+        # Windows MTP Shell.CopyHere may finish asynchronously, show a
+        # transfer dialog, or only publish the destination at the end.
+        # Do not infer success from CopyHere returning.
         item = next((x for x in target.Items() if str(x.Name) == filename), None)
         if item is None:
             raise FileNotFoundError(filename)
+        src_size = found[0].get("size")
+        if src_size is None or src_size <= 0:
+            notify("failed", message="MTP 未提供有效檔案大小，無法驗證；保留原檔")
+            raise RuntimeError("USB MTP 未提供可驗證的圖片大小；不刪除原檔")
         backup_dir_shell = self._shell.Namespace(str(backup_dir))
         if backup_dir_shell is None:
             raise RuntimeError("Windows Shell 無法開啟備份資料夾")
+        notify("copying", message="要求 Windows 複製 USB 圖片", copied=0,
+               total=src_size, timeout=backup_timeout)
         backup_dir_shell.CopyHere(item, 0)
-        deadline = time.monotonic() + 50
-        src_size = found[0].get("size")
+        deadline = time.monotonic() + backup_timeout
+        stable = 0
+        last_size = None
+        current_size = 0
         while time.monotonic() < deadline:
-            if backup.exists() and backup.stat().st_size > 0 and (
-                    src_size is None or backup.stat().st_size == src_size):
-                break
-            time.sleep(0.8)
+            try:
+                current_size = backup.stat().st_size if backup.exists() else 0
+            except OSError:
+                current_size = 0
+            notify("copying", message="等待 Windows MTP 備份完成",
+                   copied=current_size, total=src_size, timeout=backup_timeout)
+            if current_size == src_size:
+                stable = stable + 1 if last_size == current_size else 1
+                if stable >= 2:
+                    break
+            else:
+                stable = 0
+                if current_size > src_size:
+                    raise RuntimeError(
+                        "備份比裝置宣告檔案更大（%d > %d），保留原檔" %
+                        (current_size, src_size))
+            last_size = current_size
+            time.sleep(0.5)
         else:
-            local_size = backup.stat().st_size if backup.exists() else "未產生檔案"
-            expected = src_size if src_size is not None else "裝置未提供"
             raise RuntimeError(
-                "USB MTP 備份未完成或大小不符；不刪除原檔"
-                "（裝置檔案大小=%s，本機備份大小=%s）" % (expected, local_size))
+                "USB MTP 備份逾時或大小不符；不刪除原檔"
+                "（等待 %.0f 秒，裝置檔案大小=%d，本機備份大小=%d）" %
+                (backup_timeout, src_size, current_size))
+        notify("verifying", message="本機備份大小一致（連續兩次確認）",
+               copied=current_size, total=src_size)
         if confirm_delete and not question("確定刪除 mooInk 的 %s？已備份到 %s" % (filename, backup)):
             return "cancelled-after-backup: " + str(backup)
+        notify("deleting", message="備份已完成，送出 MTP 刪除要求")
         item.InvokeVerb("delete")
-        # In MTP mode delete can be asynchronous and/or require Explorer UI.
+        notify("pending", message="已送出刪除要求，尚待裝置確認")
+        # In MTP mode delete may be asynchronous and/or require Explorer UI.
         return "Windows Shell delete requested; verify manually; backup: " + str(backup)
 
 
@@ -444,14 +494,16 @@ class SleepScreenManager:
         (self.output_dir / "manifest.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def manage(self, files=None, operation="list", backup_dir="mooink_backup",
-               *, confirm=True, continue_on_error=False, on_result=None):
+               *, confirm=True, continue_on_error=False, on_result=None,
+               on_stage=None):
         """Manage sleep files. Batch deletion can report every file separately.
 
         continue_on_error=True returns a list of records:
           {name, status=deleted|pending|skipped|failed, detail}.
         Each file is independently backed up and verified before deletion.
-        on_result(index, total, record) is called after each attempt, on the
-        caller's thread (GUI callers must marshal UI changes to Tk's thread).
+        on_result(index, total, record) is called after each attempt.
+        on_stage(index, total, record) reports intermediate copy/wait phases.
+        All callbacks execute on the caller's worker thread, not the Tk thread.
         Without continue_on_error the original tuple return format remains.
         """
         if self.io is None:
@@ -494,9 +546,24 @@ class SleepScreenManager:
             results = []
             total = len(names)
             for index, name in enumerate(names, 1):
+                def emit(stage, details=None):
+                    if on_stage is None:
+                        return
+                    event = {"name": name, "stage": stage}
+                    if details:
+                        event.update(details)
+                    try:
+                        on_stage(index, total, event)
+                    except Exception:
+                        pass
+
+                emit("locate", {"message": "開始處理第 %d/%d 張" % (index, total)})
                 try:
+                    options = {}
+                    if on_stage is not None:
+                        options["progress"] = emit
                     detail = str(self.io.backup_and_delete(
-                        name, Path(backup_dir), confirm_delete=confirm))
+                        name, Path(backup_dir), confirm_delete=confirm, **options))
                     if detail.startswith("deleted+verified;"):
                         status = "deleted"
                     elif detail.startswith("cancelled-after-backup:"):
@@ -511,6 +578,7 @@ class SleepScreenManager:
                         "name": name, "status": "failed",
                         "detail": type(exc).__name__ + ": " + str(exc),
                     }
+                emit(record["status"], {"message": record["detail"]})
                 results.append(record)
                 if on_result is not None:
                     try:
