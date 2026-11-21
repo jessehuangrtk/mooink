@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+.gradle/
+android_sender/.gradle/
+android_sender/local.properties
+android_sender/app/build/
+*.apk
