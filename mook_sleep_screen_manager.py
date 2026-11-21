@@ -44,6 +44,14 @@ OUTPUT_EXTS = {".jpg", ".jpeg", ".png"}
 OFFICE_EXTS = {".xlsx", ".xls", ".xlsm", ".xlsb", ".ods", ".docx", ".doc", ".odt"}
 MAX_JPG_SIZE = 990_000  # below Readmoo's recommended 1 MB
 
+class MtpBackupNotStartedError(RuntimeError):
+    """MTP Shell copy did not materialize a local backup (systemic blocker)."""
+
+
+class MtpDeletionUnconfirmedError(RuntimeError):
+    """A Shell delete request was issued but has not been observed as complete."""
+
+
 
 def question(prompt: str, default: bool = False) -> bool:
     s = input(prompt + (" [Y/n]: " if default else " [y/N]: ")).strip().lower()
@@ -224,7 +232,8 @@ class MooinkLowLevel:
         return "copy-requested-verification-pending"
 
     def backup_and_delete(self, filename: str, backup_dir: Path, *,
-                          confirm_delete=True, progress=None, backup_timeout=50.0):
+                          confirm_delete=True, progress=None, backup_timeout=50.0,
+                          delete_after=True):
         """Back up one file and verify before requesting deletion.
 
         MTP CopyHere has no true byte-progress API. progress(stage, details)
@@ -250,11 +259,24 @@ class MooinkLowLevel:
         backup_dir.mkdir(parents=True, exist_ok=True)
         backup = backup_dir / filename
         if backup.exists():
+            # Shell.Folder.CopyHere preserves the source item's Name.
+            # It CANNOT be told to use a different destination filename.
+            # Previously we only changed `backup` to a prefixed filename,
+            # while CopyHere still wrote the *original* name into backup_dir.
+            # That guaranteed false timeouts on repeated backups and could
+            # trigger an unintended overwrite confirmation. Fix by copying
+            # into a new empty subdirectory with the original filename.
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             counter = 1
-            while backup.exists():
-                backup = backup_dir / ("%s_%03d_%s" % (stamp, counter, filename))
-                counter += 1
+            while True:
+                location = backup_dir / ("mooink_%s_%03d" % (stamp, counter))
+                try:
+                    location.mkdir()
+                    break
+                except FileExistsError:
+                    counter += 1
+            backup = location / filename
+        notify("backup_target", message="本機備份位置：" + str(backup))
         if isinstance(target, Path):
             src = target / filename
             expected_size = src.stat().st_size
@@ -264,6 +286,9 @@ class MooinkLowLevel:
                    total=expected_size)
             if not backup.exists() or backup.stat().st_size != src.stat().st_size:
                 raise RuntimeError("備份驗證失敗，拒絕刪除")
+            if not delete_after:
+                notify("verified", message="備份完成，不刪除原檔")
+                return "backup-only-verified; backup: " + str(backup)
             notify("deleting", message="備份已驗證，正在刪除")
             src.unlink()
             if src.exists():
@@ -281,7 +306,7 @@ class MooinkLowLevel:
         if src_size is None or src_size <= 0:
             notify("failed", message="MTP 未提供有效檔案大小，無法驗證；保留原檔")
             raise RuntimeError("USB MTP 未提供可驗證的圖片大小；不刪除原檔")
-        backup_dir_shell = self._shell.Namespace(str(backup_dir))
+        backup_dir_shell = self._shell.Namespace(str(backup.parent))
         if backup_dir_shell is None:
             raise RuntimeError("Windows Shell 無法開啟備份資料夾")
         if not 5 <= backup_timeout <= 300:
@@ -313,18 +338,36 @@ class MooinkLowLevel:
             last_size = current_size
             time.sleep(0.5)
         else:
+            if current_size == 0:
+                raise MtpBackupNotStartedError(
+                    "USB MTP CopyHere 等待 %.0f 秒後，目的資料夾仍未出現備份檔；"
+                    "可能是 Windows Shell 傳輸未啟動、遭提示視窗阻擋，"
+                    "或 MTP 裝置未支援此複製方式。停止連續嘗試以免空等。"
+                    "裝置宣告大小=%d bytes；預期本機位置=%s" %
+                    (backup_timeout, src_size, backup))
             raise RuntimeError(
                 "USB MTP 備份逾時或大小不符；不刪除原檔"
-                "（等待 %.0f 秒，裝置檔案大小=%d，本機備份大小=%d）" %
-                (backup_timeout, src_size, current_size))
-        notify("verifying", message="本機備份大小一致（連續兩次確認）",
+                "（等待 %.0f 秒，裝置檔案大小=%d，本機備份大小=%d，位置=%s）" %
+                (backup_timeout, src_size, current_size, backup))
+        notify("verifying", message="本機備份大小一致（連續兩次確認，尚非雜湊比對）",
                copied=current_size, total=src_size)
+        if not delete_after:
+            notify("verified", message="備份檔案大小驗證完成，不刪除原檔")
+            return "backup-only-size-verified; backup: " + str(backup)
         if confirm_delete and not question("確定刪除 mooInk 的 %s？已備份到 %s" % (filename, backup)):
             return "cancelled-after-backup: " + str(backup)
         notify("deleting", message="備份已完成，送出 MTP 刪除要求")
         item.InvokeVerb("delete")
-        notify("pending", message="已送出刪除要求，尚待裝置確認")
-        # In MTP mode delete may be asynchronous and/or require Explorer UI.
+        # This Shell verb is asynchronous. Observe the device rather than
+        # reporting a successful deletion just because InvokeVerb returned.
+        notify("deleting", message="已送出刪除要求，正在重新檢查裝置清單")
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            time.sleep(0.8)
+            if filename not in {row["name"] for row in self.list_sleep()}:
+                notify("deleted", message="MTP 清單確認原檔已消失")
+                return "deleted+verified; backup: " + str(backup)
+        notify("pending", message="MTP 刪除未確認；不會接著刪除其他檔案")
         return "Windows Shell delete requested; verify manually; backup: " + str(backup)
 
 
@@ -497,7 +540,7 @@ class SleepScreenManager:
 
     def manage(self, files=None, operation="list", backup_dir="mooink_backup",
                *, confirm=True, continue_on_error=False, on_result=None,
-               on_stage=None, backup_timeout=None):
+               on_stage=None, backup_timeout=None, stop_on_mtp_stall=False):
         """Manage sleep files. Batch deletion can report every file separately.
 
         continue_on_error=True returns a list of records:
@@ -506,6 +549,8 @@ class SleepScreenManager:
         on_result(index, total, record) is called after each attempt.
         on_stage(index, total, record) reports intermediate copy/wait phases.
         All callbacks execute on the caller's worker thread, not the Tk thread.
+        stop_on_mtp_stall=True halts after a copy that never starts, or after
+        an unconfirmed MTP delete, to avoid many long useless retries.
         Without continue_on_error the original tuple return format remains.
         """
         if self.io is None:
@@ -547,6 +592,7 @@ class SleepScreenManager:
             # A failed backup never requests a delete for that file.
             results = []
             total = len(names)
+            blocked_reason = None
             for index, name in enumerate(names, 1):
                 def emit(stage, details=None):
                     if on_stage is None:
@@ -559,6 +605,19 @@ class SleepScreenManager:
                     except Exception:
                         pass
 
+                if blocked_reason is not None:
+                    record = {
+                        "name": name, "status": "blocked",
+                        "detail": "未執行；前一張發生系統性 MTP 問題：" + blocked_reason,
+                    }
+                    results.append(record)
+                    emit("blocked", {"message": record["detail"]})
+                    if on_result is not None:
+                        try:
+                            on_result(index, total, record)
+                        except Exception:
+                            pass
+                    continue
                 emit("locate", {"message": "開始處理第 %d/%d 張" % (index, total)})
                 try:
                     options = {}
@@ -570,13 +629,24 @@ class SleepScreenManager:
                         name, Path(backup_dir), confirm_delete=confirm, **options))
                     if detail.startswith("deleted+verified;"):
                         status = "deleted"
+                    elif detail.startswith("backup-only-"):
+                        status = "backed_up"
                     elif detail.startswith("cancelled-after-backup:"):
                         status = "skipped"
                     else:
                         # Windows Shell/MTP deletion is asynchronous. A
                         # completed call is NOT proof that the file disappeared.
                         status = "pending"
+                        if stop_on_mtp_stall and getattr(self.io, "transport", None) == "usb":
+                            blocked_reason = "已送出刪除命令，但無法確認裝置已刪除"
                     record = {"name": name, "status": status, "detail": detail}
+                except MtpBackupNotStartedError as exc:
+                    if stop_on_mtp_stall:
+                        blocked_reason = str(exc)
+                    record = {
+                        "name": name, "status": "failed",
+                        "detail": type(exc).__name__ + ": " + str(exc),
+                    }
                 except Exception as exc:
                     record = {
                         "name": name, "status": "failed",
