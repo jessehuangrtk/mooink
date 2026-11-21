@@ -1,2 +1,6 @@
-mss>=9.0,<11
+# GUI + file/image conversion
 Pillow>=10.0,<13
+PyMuPDF>=1.24,<2
+pywin32>=306; sys_platform == "win32"
+# Experimental HTTP screen sender / viewer support
+mss>=9.0,<11
