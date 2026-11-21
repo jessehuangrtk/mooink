@@ -390,8 +390,8 @@ class MooinkSleepUI:
                     row = info["record"]
                     label = labels.get(row["status"], row["status"])
                     self.status.set("%s %d/%d：%s（%s）" %
-                                    (self._transfer_kind,
-                                    (info["index"], info["total"], row["name"], label))
+                                    (self._transfer_kind, info["index"],
+                                     info["total"], row["name"], label))
                     self.backup_batch_bar["value"] = 100 * info["index"] / info["total"]
                     self.backup_batch_label.set("批次進度：%d / %d（%.0f%%）" %
                                                 (info["index"], info["total"],
@@ -698,10 +698,10 @@ class MooinkSleepUI:
             return
         if not messagebox.askyesno(
             "確認上傳",
-            "將上傳 %d 張 JPG/PNG 至 mooInk sleep。\\n"
+            "將上傳 %d 張 JPG/PNG 至 mooInk sleep。\n"
             "USB 改用 WPD 直接寫入；每張會從裝置讀回並比較 SHA-256，"
-            "只把驗證成功的檔案列為完成。\\n"
-            "同名檔案不覆寫，整批只確認這一次。\\n\\n確定繼續？" % len(paths),
+            "只把驗證成功的檔案列為完成。\n"
+            "同名檔案不覆寫，整批只確認這一次。\n\n確定繼續？" % len(paths),
         ):
             return
 
@@ -770,8 +770,8 @@ class MooinkSleepUI:
                 details.append("%02d. [%s] %s — %s" %
                                (index, row["status"], row["name"], row["detail"]))
             if refresh_error:
-                details.append("\\n清單更新失敗：" + refresh_error)
-            messagebox.showinfo("mooInk sleep 上傳結果", "\\n".join(details))
+                details.append("\n清單更新失敗：" + refresh_error)
+            messagebox.showinfo("mooInk sleep 上傳結果", "\n".join(details))
 
         self._device_job("上傳 sleep 圖片", operation, done, writing=True,
                          backup_batch=(len(paths), 0, "上傳 sleep 圖片"))
