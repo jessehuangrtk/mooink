@@ -880,6 +880,31 @@ class SleepScreenManager:
                 print("操作未完成：" + str(exc))
 
 
+
+def convert_both_sizes(paths, *, orientation="auto", fit="smart",
+                       output_dir="mooink_prepared"):
+    """Convert each input for both reader sizes, using one shared algorithm.
+
+    Files are separated into <output_dir>/10.3 and <output_dir>/13.3.
+    Each subfolder has its own manifest.json. This never communicates
+    with a connected reader; device-size selection only affects uploads.
+    """
+    root = Path(output_dir).expanduser().resolve()
+    if not str(root):
+        raise ValueError("請指定圖片輸出根目錄")
+    source_paths = list(paths)
+    outputs = {}
+    logs = []
+    for size in ("10.3", "13.3"):
+        manager = SleepScreenManager(
+            size=size, orientation=orientation, fit=fit,
+            output_dir=root / size,
+        )
+        outputs[size] = manager.convert(source_paths)
+        logs.extend("[%s 吋] %s" % (size, line) for line in manager.logs)
+    return outputs, logs
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--size", choices=RESOLUTIONS, default="13.3")
