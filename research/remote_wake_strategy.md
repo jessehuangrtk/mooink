@@ -72,3 +72,21 @@ Verified in the current upstream `janten/dpt-rp1-py` source (dptrp1/dptrp1.py an
 - Only after successful pairing should a read-only `dptrp1 --addr 192.168.1.137 list-documents` or `get-configuration` be attempted. No immediate wake/sleep API has been validated.
 
 Source: https://github.com/janten/dpt-rp1-py
+
+## Awake vs asleep `display-document` behavior (2026-11-21)
+
+Using the authenticated, Sony-compatible `dpt-rp1-py` tool, the first-generation mooInk Pro was instructed to open an existing PDF:
+
+```cmd
+python -m dptrp1.cli.dptrp1 --addr 192.168.1.137 display-document "Document/Samples/快速上手v1.pdf" 1
+```
+
+- **While awake:** user confirmed the reader *does* switch to the specified PDF page. Therefore this documented viewer command is practically compatible with the reader when awake.
+- **While asleep:** command returned to shell without printing an error, but the e-paper panel **did not wake or switch**.
+- Upstream's `DigitalPaper.display_document` invokes `self._put_endpoint("/viewer/controls/open2", data={"document_id": document_id, "page": page})` and **discards the HTTP response** instead of calling `raise_for_status()`. No CLI output is **not proof of success or of HTTP 2xx**.
+- Conclusion: the viewer's open-document endpoint is **not a verified remote wake source**. Do not propose it as a solution for the desired sleep-image refresh cycle.
+- Next diagnostic (if needed): record the actual HTTP response status of the authenticated `PUT` while asleep, but avoid repeated toggles or treating UI commands as power commands. A physical wake button may be required unless another verified wake source is found.
+
+User goal remains *MTP image transfer → remotely wake → remotely sleep → new sleep image visible*. **Do not pivot to PDF mirroring as the chosen design.**
+
+Source code: https://github.com/janten/dpt-rp1-py/blob/master/dptrp1/dptrp1.py
