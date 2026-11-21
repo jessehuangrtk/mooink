@@ -451,13 +451,14 @@ class SleepScreenManager:
                      [f["name"] for f in current] if operation == "clear" else [])
             if not names:
                 return []
-            print("將先備份每個 JPG/PNG，然後刪除以下 sleep 圖片（不動其他檔案）：")
-            for name in names:
-                print("  " + name)
-            # A GUI may confirm on the main thread, then pass confirm=False.
-            # CLI callers keep the original interactive confirmation prompts.
-            if confirm and not question("確定執行？", default=False):
-                return ["cancelled"]
+            # The GUI already confirmed through its dialog; do not print
+            # to a missing pythonw stdout or call input() on a worker thread.
+            if confirm:
+                print("將先備份每個 JPG/PNG，然後刪除以下 sleep 圖片（不動其他檔案）：")
+                for name in names:
+                    print("  " + name)
+                if not question("確定執行？", default=False):
+                    return ["cancelled"]
             return [(name, self.io.backup_and_delete(
                 name, Path(backup_dir), confirm_delete=confirm)) for name in names]
         raise ValueError("Unsupported operation: " + operation)
