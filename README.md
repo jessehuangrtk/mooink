@@ -4,6 +4,10 @@
 
 > **重要限制**：目前沒有經實機證實可用的「遠端直接喚醒／立即休眠／立即刷新電子紙」命令。USB 可以改變 sleep 儲存內容，不代表畫面會即時更新。本專案不修改裝置韌體、不破解 DRM，也不保證 Windows 以外的平台具有 USB MTP 功能。
 
+## Pico 2 W 藍牙鍵盤喚醒
+
+已新增獨立 Pico 2 W USB→Bluetooth Classic HID 鍵盤韌體與 Windows 控制工具 [pico2w_usb2bluetooth.py](pico2w_usb2bluetooth.py)。支援手動配對、指定按鍵喚醒與專用 GUI 輸入區。詳見 [編譯、燒錄、配對與使用說明](pico2w_usb2bluetooth/README.md)。實機刷新仍待驗證；不透過 Wi-Fi IP 發送藍牙按鍵。
+
 ## 程式入口
 
 | 檔案 | 作用 |

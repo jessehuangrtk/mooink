@@ -6,3 +6,6 @@ pywin32>=306; sys_platform == "win32"
 comtypes>=1.4.11; sys_platform == "win32"
 # Experimental HTTP screen sender / viewer support
 mss>=9.0,<11
+
+# Pico 2 W USB CDC Bluetooth keyboard controller
+pyserial>=3.5,<4

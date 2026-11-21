@@ -25,3 +25,6 @@ offline_mooink_wheels.zip
 # Generated office and editor artifacts
 ~$*
 .DS_Store
+
+# Pico SDK build outputs
+pico2w_usb2bluetooth/build/

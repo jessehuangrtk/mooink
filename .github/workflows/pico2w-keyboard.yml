@@ -1,0 +1,41 @@
+name: Pico 2W Bluetooth keyboard
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pico2w_usb2bluetooth/**'
+      - 'pico2w_usb2bluetooth.py'
+      - 'tests/test_pico2w_usb2bluetooth.py'
+      - '.github/workflows/pico2w-keyboard.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  firmware:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: ARM cross compiler and host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib cmake ninja-build libusb-1.0-0-dev
+      - name: Raspberry Pi SDK 2.2.0
+        run: git clone --branch 2.2.0 --depth 1 --recurse-submodules --shallow-submodules https://github.com/raspberrypi/pico-sdk.git "$RUNNER_TEMP/pico-sdk"
+      - name: Build Pico 2W firmware
+        run: |
+          export PICO_SDK_PATH="$RUNNER_TEMP/pico-sdk"
+          bash pico2w_usb2bluetooth/build_wsl.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pico2w_usb2bluetooth-uf2
+          path: pico2w_usb2bluetooth/build/pico2w_usb2bluetooth.uf2
+          if-no-files-found: error
+  host-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m py_compile pico2w_usb2bluetooth.py
+      - run: python -m unittest discover -s tests -p test_pico2w_usb2bluetooth.py -v
