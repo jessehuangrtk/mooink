@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
@@ -111,6 +112,9 @@ class MooinkSleepUI:
         self.root.after(100, self._drain)
         self.root.after(350, self._backup_tick)
         self._log("UI 已啟動；所有裝置檔案操作由 mook_sleep_screen_manager.py 執行。")
+        self._log("GUI Python：%s（%s.%s）" % (
+            sys.executable, sys.version_info.major, sys.version_info.minor))
+        self._log("USB WPD 模組已隨本專案附帶；不需另裝 PyPI mtp，請安裝 requirements.txt 中的 comtypes。")
 
     def _style(self):
         style = ttk.Style(self.root)
