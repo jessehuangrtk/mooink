@@ -44,6 +44,10 @@ OUTPUT_EXTS = {".jpg", ".jpeg", ".png"}
 OFFICE_EXTS = {".xlsx", ".xls", ".xlsm", ".xlsb", ".ods", ".docx", ".doc", ".odt"}
 MAX_JPG_SIZE = 990_000  # below Readmoo's recommended 1 MB
 
+class MtpUnknownSizeError(RuntimeError):
+    """MTP does not report the source size; automatic deletion is unsafe."""
+
+
 class MtpBackupNotStartedError(RuntimeError):
     """MTP Shell copy did not materialize a local backup (systemic blocker)."""
 
@@ -62,6 +66,30 @@ def safe_file_name(text: str) -> str:
     import re
     out = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text).strip(" .")
     return out[:90] or "image"
+
+
+def cleanup_empty_backup_dirs(backup_dir):
+    """Remove only directly nested EMPTY mooink_YYYYMMDD_HHMMSS_NNN folders.
+
+    Never walk recursively, never delete contents or files, never follow
+    symlinks. Do not call during an in-flight Shell.CopyHere transfer.
+    """
+    import re
+    base = Path(backup_dir)
+    if not base.is_dir():
+        return []
+    removed = []
+    for child in base.iterdir():
+        if not re.fullmatch(r"mooink_\d{8}_\d{6}_\d{3}", child.name):
+            continue
+        if child.is_symlink() or not child.is_dir():
+            continue
+        try:
+            child.rmdir()  # Succeeds only for a truly empty directory.
+        except OSError:
+            continue
+        removed.append(str(child))
+    return removed
 
 
 class MooinkLowLevel:
@@ -182,6 +210,26 @@ class MooinkLowLevel:
             "Sony Wi-Fi API 目前只驗證 Document，沒有驗證 sleep 資料夾的 API。"
             "請使用 USB，或明確掛載並提供 --wifi-share \\server\\share\\sleep。")
 
+    @staticmethod
+    def _mtp_size(item):
+        """Read size without assuming ShellItem.Size is supplied by WPD."""
+        for getter in (
+            lambda: getattr(item, "Size"),
+            lambda: item.ExtendedProperty("System.Size"),
+        ):
+            try:
+                value = getter()
+                if value is not None and not isinstance(value, bool):
+                    number = int(value)
+                    if number > 0:
+                        return number
+            except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+                continue
+            except Exception:
+                # COM may return a failing HRESULT for unsupported properties.
+                continue
+        return None
+
     def list_sleep(self):
         target = self._target()
         if isinstance(target, Path):
@@ -191,10 +239,7 @@ class MooinkLowLevel:
         for item in target.Items():
             n = str(item.Name)
             if not bool(item.IsFolder) and Path(n).suffix.lower() in OUTPUT_EXTS:
-                try:
-                    size = int(item.Size)
-                except Exception:
-                    size = None
+                size = self._mtp_size(item)
                 items.append({"name": n, "size": size})
         return sorted(items, key=lambda x: x["name"].lower())
 
@@ -255,31 +300,31 @@ class MooinkLowLevel:
         found = [x for x in self.list_sleep() if x["name"] == filename]
         if not found:
             raise FileNotFoundError(filename)
+        # Do NOT create even the backup root here. MTP metadata validation
+        # must run first; otherwise 22 missing sizes create 22 empty folders.
         backup_dir = Path(backup_dir).resolve()
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        backup = backup_dir / filename
-        if backup.exists():
-            # Shell.Folder.CopyHere preserves the source item's Name.
-            # It CANNOT be told to use a different destination filename.
-            # Previously we only changed `backup` to a prefixed filename,
-            # while CopyHere still wrote the *original* name into backup_dir.
-            # That guaranteed false timeouts on repeated backups and could
-            # trigger an unintended overwrite confirmation. Fix by copying
-            # into a new empty subdirectory with the original filename.
+
+        def reserve_backup_path():
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            path = backup_dir / filename
+            if not path.exists():
+                return path
+            # Shell.CopyHere always writes the original source item name;
+            # put duplicates in a new destination directory, not a new name.
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             counter = 1
             while True:
                 location = backup_dir / ("mooink_%s_%03d" % (stamp, counter))
                 try:
                     location.mkdir()
-                    break
+                    return location / filename
                 except FileExistsError:
                     counter += 1
-            backup = location / filename
-        notify("backup_target", message="本機備份位置：" + str(backup))
         if isinstance(target, Path):
             src = target / filename
             expected_size = src.stat().st_size
+            backup = reserve_backup_path()
+            notify("backup_target", message="本機備份位置：" + str(backup))
             notify("copying", message="複製共享資料夾圖片", copied=0, total=expected_size)
             shutil.copy2(src, backup)
             notify("verifying", message="確認備份大小", copied=backup.stat().st_size,
@@ -302,15 +347,30 @@ class MooinkLowLevel:
         item = next((x for x in target.Items() if str(x.Name) == filename), None)
         if item is None:
             raise FileNotFoundError(filename)
-        src_size = found[0].get("size")
+        src_size = self._mtp_size(item) or found[0].get("size")
         if src_size is None or src_size <= 0:
-            notify("failed", message="MTP 未提供有效檔案大小，無法驗證；保留原檔")
-            raise RuntimeError("USB MTP 未提供可驗證的圖片大小；不刪除原檔")
-        backup_dir_shell = self._shell.Namespace(str(backup.parent))
-        if backup_dir_shell is None:
-            raise RuntimeError("Windows Shell 無法開啟備份資料夾")
+            if delete_after:
+                notify("failed", message="MTP 無法取得來源大小；拒絕自動刪除，請先單張備份測試")
+                raise MtpUnknownSizeError(
+                    "USB MTP 的 Size 與 System.Size 都無法取得來源大小，"
+                    "自動刪除不可驗證；尚未建立任何備份資料夾。"
+                    "請使用「單張備份測試（不刪除）」診斷。")
+            notify("copying", message="MTP 來源大小未知：只測試複製，絕不刪除")
+            src_size = None
         if not 5 <= backup_timeout <= 300:
             raise ValueError("單張 MTP 備份等待秒數必須介於 5 至 300")
+        backup = reserve_backup_path()
+        notify("backup_target", message="本機備份位置：" + str(backup))
+        backup_dir_shell = self._shell.Namespace(str(backup.parent))
+        if backup_dir_shell is None:
+            # Only cleanup the newly created backup directory if no copy
+            # operation was submitted; never remove a file-filled folder.
+            if backup.parent != backup_dir:
+                try:
+                    backup.parent.rmdir()
+                except OSError:
+                    pass
+            raise RuntimeError("Windows Shell 無法開啟備份資料夾")
         notify("copying", message="要求 Windows 複製 USB 圖片", copied=0,
                total=src_size, timeout=backup_timeout)
         deadline = time.monotonic() + backup_timeout
@@ -325,7 +385,14 @@ class MooinkLowLevel:
                 current_size = 0
             notify("copying", message="等待 Windows MTP 備份完成",
                    copied=current_size, total=src_size, timeout=backup_timeout)
-            if current_size == src_size:
+            if src_size is None:
+                # Backup-only fallback: no original size, so require an
+                # unchanged nonempty local file over several observations.
+                # This is diagnostic evidence, NOT proof of source equality.
+                stable = stable + 1 if current_size > 0 and last_size == current_size else 0
+                if stable >= 6:
+                    break
+            elif current_size == src_size:
                 stable = stable + 1 if last_size == current_size else 1
                 if stable >= 2:
                     break
@@ -343,12 +410,26 @@ class MooinkLowLevel:
                     "USB MTP CopyHere 等待 %.0f 秒後，目的資料夾仍未出現備份檔；"
                     "可能是 Windows Shell 傳輸未啟動、遭提示視窗阻擋，"
                     "或 MTP 裝置未支援此複製方式。停止連續嘗試以免空等。"
-                    "裝置宣告大小=%d bytes；預期本機位置=%s" %
-                    (backup_timeout, src_size, backup))
+                    "裝置宣告大小=%s bytes；預期本機位置=%s" %
+                    (backup_timeout, src_size if src_size is not None else "未知", backup))
             raise RuntimeError(
                 "USB MTP 備份逾時或大小不符；不刪除原檔"
-                "（等待 %.0f 秒，裝置檔案大小=%d，本機備份大小=%d，位置=%s）" %
-                (backup_timeout, src_size, current_size, backup))
+                "（等待 %.0f 秒，裝置檔案大小=%s，本機備份大小=%d，位置=%s）" %
+                (backup_timeout, src_size if src_size is not None else "未知", current_size, backup))
+        if src_size is None:
+            if delete_after:
+                raise MtpUnknownSizeError("來源大小未知，保留原檔")
+            # Verify the local image decodes. Still NOT sufficient evidence
+            # to delete the device source: no source byte count/hash.
+            try:
+                from PIL import Image
+                with Image.open(backup) as image:
+                    image.load()
+            except Exception as exc:
+                raise RuntimeError("來源大小未知且備份圖片無法完整解碼；原檔保留：" + str(exc))
+            notify("verified", message="本機圖片可解碼，但來源大小未知，原檔保留",
+                   copied=current_size, total=None)
+            return "backup-only-unverified-source-size; backup: " + str(backup)
         notify("verifying", message="本機備份大小一致（連續兩次確認，尚非雜湊比對）",
                copied=current_size, total=src_size)
         if not delete_after:
@@ -640,7 +721,7 @@ class SleepScreenManager:
                         if stop_on_mtp_stall and getattr(self.io, "transport", None) == "usb":
                             blocked_reason = "已送出刪除命令，但無法確認裝置已刪除"
                     record = {"name": name, "status": status, "detail": detail}
-                except MtpBackupNotStartedError as exc:
+                except (MtpBackupNotStartedError, MtpUnknownSizeError) as exc:
                     if stop_on_mtp_stall:
                         blocked_reason = str(exc)
                     record = {
