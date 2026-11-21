@@ -204,5 +204,83 @@ class BatchDeleteTests(unittest.TestCase):
 
 
 
+class LiveBackupProgressTests(unittest.TestCase):
+    def test_live_phases_on_shared_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            device = root / "sleep"
+            device.mkdir()
+            (device / "first.jpg").write_bytes(b"A" * 1024)
+            io = MooinkLowLevel(transport="wifi", wifi_share=str(device))
+            manager = SleepScreenManager(output_dir=str(root / "prepared"), io_layer=io)
+            stages = []
+            rows = manager.manage(
+                files=["first.jpg"], operation="delete",
+                backup_dir=str(root / "backups"), confirm=False,
+                continue_on_error=True, backup_timeout=15,
+                on_stage=lambda index, total, row: stages.append(
+                    (index, total, row["stage"], row["name"])
+                ),
+            )
+            self.assertEqual(rows[0]["status"], "deleted")
+            self.assertEqual(stages[0], (1, 1, "locate", "first.jpg"))
+            self.assertIn("copying", [x[2] for x in stages])
+            self.assertIn("verifying", [x[2] for x in stages])
+            self.assertIn("deleting", [x[2] for x in stages])
+            self.assertEqual(stages[-1][2], "deleted")
+
+    def test_unknown_mtp_size_never_requests_delete_or_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            events = []
+            item = SimpleNamespace(Name="unknown.jpg")
+            folder = SimpleNamespace(Items=lambda: [item])
+            io = MooinkLowLevel(transport="usb")
+            io._target = lambda write=False: folder
+            io.list_sleep = lambda: [{"name": "unknown.jpg", "size": None}]
+            io._shell = SimpleNamespace(Namespace=lambda p: events.append("namespace"))
+            rows = SleepScreenManager(output_dir=str(root / "prepared"), io_layer=io).manage(
+                files=["unknown.jpg"], operation="delete", backup_dir=str(root / "backup"),
+                continue_on_error=True, confirm=False,
+                on_stage=lambda i, n, row: events.append(row["stage"]),
+            )
+            self.assertEqual(rows[0]["status"], "failed")
+            self.assertIn("未提供", rows[0]["detail"])
+            self.assertNotIn("namespace", events)
+            self.assertNotIn("deleting", events)
+
+    def test_mock_mtp_copy_reports_observed_bytes_and_wait_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload = b"x" * 2048
+            device_item = SimpleNamespace(Name="check.jpg", Size=len(payload))
+            requests = []
+            def fake_delete(verb):
+                requests.append(verb)
+            device_item.InvokeVerb = fake_delete
+
+            class FakeBackupFolder:
+                def CopyHere(self, item, options):
+                    requests.append("copy")
+                    (root / "backup" / item.Name).write_bytes(payload)
+
+            io = MooinkLowLevel(transport="usb")
+            io._target = lambda write=False: SimpleNamespace(Items=lambda: [device_item])
+            io.list_sleep = lambda: [{"name": "check.jpg", "size": len(payload)}]
+            io._shell = SimpleNamespace(Namespace=lambda _: FakeBackupFolder())
+            stages = []
+            record = io.backup_and_delete(
+                "check.jpg", root / "backup", confirm_delete=False,
+                progress=lambda stage, details: stages.append((stage, details)),
+                backup_timeout=5,
+            )
+            self.assertIn("delete requested", record)
+            self.assertEqual(requests, ["copy", "delete"])
+            self.assertTrue(any(stage == "copying" and data.get("copied") == len(payload)
+                                for stage, data in stages))
+            self.assertEqual(stages[-1][0], "pending")
+
+
+
 if __name__ == "__main__":
     unittest.main()
