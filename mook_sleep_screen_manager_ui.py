@@ -334,20 +334,27 @@ class MooinkSleepUI:
         finally:
             pythoncom.CoUninitialize()
 
+    def _manager_options(self):
+        """Snapshot UI configuration on Tk's main thread before starting a worker."""
+        return {
+            "size": self.reader_size.get(),
+            "orientation": self.orientation.get(),
+            "fit": self.fit.get(),
+            "output_dir": self.output_dir.get().strip(),
+        }
+
     def _convert(self):
         if not self._inputs:
             messagebox.showinfo("缺少檔案", "請先加入至少一個圖片或文件。")
             return
         inputs = list(self._inputs)
-        size, orient, fit, output_dir = (
-            self.reader_size.get(), self.orientation.get(), self.fit.get(), self.output_dir.get().strip()
-        )
-        if not output_dir:
+        options = self._manager_options()
+        if not options["output_dir"]:
             messagebox.showwarning("缺少目錄", "請指定輸出目錄。")
             return
 
         def work():
-            manager = SleepScreenManager(size=size, orientation=orient, fit=fit, output_dir=output_dir)
+            manager = SleepScreenManager(**options)
             paths = manager.convert(inputs)
             return ([str(p) for p in paths], list(manager.logs))
 
@@ -463,11 +470,10 @@ class MooinkSleepUI:
         ):
             return
 
+        options = self._manager_options()
+
         def operation(io):
-            manager = SleepScreenManager(
-                size=self.reader_size.get(), orientation=self.orientation.get(),
-                fit=self.fit.get(), output_dir=self.output_dir.get(), io_layer=io,
-            )
+            manager = SleepScreenManager(io_layer=io, **options)
             return manager.manage(files=list(paths), operation="add")
 
         def done(result):
@@ -494,11 +500,10 @@ class MooinkSleepUI:
         ):
             return
 
+        options = self._manager_options()
+
         def operation(io):
-            manager = SleepScreenManager(
-                size=self.reader_size.get(), orientation=self.orientation.get(),
-                fit=self.fit.get(), output_dir=self.output_dir.get(), io_layer=io,
-            )
+            manager = SleepScreenManager(io_layer=io, **options)
             return manager.manage(files=names, operation="delete", backup_dir=back_dir, confirm=False)
 
         def done(result):
