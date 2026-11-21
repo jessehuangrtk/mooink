@@ -243,38 +243,57 @@ class MooinkLowLevel:
                 items.append({"name": n, "size": size})
         return sorted(items, key=lambda x: x["name"].lower())
 
-    def add_file(self, path: Path, overwrite=False):
+    def add_file(self, path: Path, overwrite=False, progress=None):
+        """Upload to sleep, reporting stages through the optional callback.
+
+        Direct WPD replaces Shell.CopyHere for USB: it confirms success by
+        reading back the uploaded file and comparing SHA256, not by trusting
+        asynchronous Shell requests or missing MTP file-size properties.
+        """
         path = Path(path).resolve()
         if not path.is_file() or path.suffix.lower() not in OUTPUT_EXTS:
             raise ValueError("只接受已產生的 JPG/PNG 檔案")
+
+        def notify(stage, **fields):
+            if progress:
+                try:
+                    progress(stage, fields)
+                except Exception:
+                    pass
+
+        if self.transport == "usb":
+            if len(self.usb_devices()) != 1:
+                raise RuntimeError("USB 上傳僅允許同時連接一台 mooInk；請確認裝置")
+            if overwrite:
+                raise ValueError("USB 不允許無備份覆寫已有檔案")
+            from mook_mtp_wpd import upload_one
+            return upload_one(path, progress=progress)
+
         target = self._target(write=True)
-        existing = {p["name"].lower() for p in self.list_sleep()}
-        if path.name.lower() in existing and not overwrite:
+        if not isinstance(target, Path):
+            raise RuntimeError("Wi-Fi 上傳需要已掛載的 sleep 資料夾")
+        names = {p["name"].casefold() for p in self.list_sleep()}
+        if path.name.casefold() in names and not overwrite:
             raise FileExistsError("sleep 已有同名檔案：" + path.name)
-        if isinstance(target, Path):
-            dest = target / path.name
-            shutil.copy2(path, dest)
-            return "copied+verified" if dest.stat().st_size == path.stat().st_size else "copy-size-mismatch"
-        if path.name.lower() in existing:
-            raise FileExistsError("MTP 模式不自動覆寫同名檔；請先備份、刪除原檔")
-        # CopyHere is asynchronous on WPD: never claim immediate success.
-        target.CopyHere(str(path), 0)  # Shell manages transfer / prompts
-        deadline = time.monotonic() + 50
-        seen_stable = 0
-        previous = None
-        while time.monotonic() < deadline:
-            entry = next((x for x in self.list_sleep() if x["name"].lower() == path.name.lower()), None)
-            if entry:
-                n = entry.get("size")
-                if n == path.stat().st_size:
-                    seen_stable = seen_stable + 1 if previous == n else 1
-                    if seen_stable >= 2:
-                        return "appeared+size-verified"
-                elif n is None:
-                    return "appeared-unverified-size"
-                previous = n
-            time.sleep(0.8)
-        return "copy-requested-verification-pending"
+        destination = target / path.name
+        notify("uploading", message="正在複製到已掛載的 sleep 資料夾",
+               copied=0, total=path.stat().st_size)
+        shutil.copy2(path, destination)
+        notify("verifying", message="檢查共享資料夾複製後的 SHA-256",
+               copied=destination.stat().st_size, total=path.stat().st_size)
+        if destination.stat().st_size != path.stat().st_size:
+            raise RuntimeError("共享 sleep 檔案大小不符，不宣稱成功")
+        def sha256(src):
+            digest = hashlib.sha256()
+            with src.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            return digest.digest()
+        if sha256(path) != sha256(destination):
+            raise RuntimeError("共享 sleep 檔案 SHA-256 不一致，不宣稱成功")
+        notify("verified", message="已掛載 sleep 共享檔案 SHA-256 驗證成功",
+               copied=path.stat().st_size, total=path.stat().st_size)
+        return "uploaded+sha256-verified; sleep: " + path.name
 
     def backup_and_delete(self, filename: str, backup_dir: Path, *,
                           confirm_delete=True, progress=None, backup_timeout=50.0,
@@ -653,10 +672,64 @@ class SleepScreenManager:
         if operation == "add":
             if not files:
                 raise ValueError("新增需指定檔案")
-            result = []
-            for path in files:
-                result.append((str(path), self.io.add_file(Path(path))))
-            return result
+            if not continue_on_error:
+                return [(str(path), self.io.add_file(Path(path))) for path in files]
+
+            # Upload one file at a time. Unlike Shell.CopyHere, WPD reports
+            # verified results only after reading the device copy back.
+            results = []
+            blocked_reason = None
+            total = len(files)
+            for index, raw in enumerate(files, 1):
+                name = Path(raw).name
+
+                def emit(stage, details=None):
+                    if on_stage is None:
+                        return
+                    event = {"name": name, "stage": stage}
+                    if details:
+                        event.update(details)
+                    try:
+                        on_stage(index, total, event)
+                    except Exception:
+                        pass
+
+                if blocked_reason is not None:
+                    record = {
+                        "name": name, "status": "blocked",
+                        "detail": "未執行，前一檔 WPD 裝置問題：" + blocked_reason,
+                    }
+                else:
+                    emit("locate", {"message": "準備上傳 %s" % name})
+                    try:
+                        progress = emit if on_stage else None
+                        detail = str(self.io.add_file(Path(raw), progress=progress))
+                        if not detail.startswith("uploaded+sha256-verified;"):
+                            raise RuntimeError(
+                                "上傳未得到 SHA-256 驗證成功回覆：" + detail
+                            )
+                        record = {"name": name, "status": "verified", "detail": detail}
+                    except FileExistsError as exc:
+                        record = {
+                            "name": name, "status": "skipped",
+                            "detail": "同名檔案已存在，未覆寫：" + str(exc),
+                        }
+                    except Exception as exc:
+                        from mook_mtp_wpd import QuietMtpUnavailable
+                        if isinstance(exc, QuietMtpUnavailable):
+                            blocked_reason = str(exc)
+                        record = {
+                            "name": name, "status": "failed",
+                            "detail": type(exc).__name__ + ": " + str(exc),
+                        }
+                results.append(record)
+                emit(record["status"], {"message": record["detail"]})
+                if on_result:
+                    try:
+                        on_result(index, total, record)
+                    except Exception:
+                        pass
+            return results
         if operation in ("delete", "clear"):
             # For explicit selections, let each individual backup_and_delete
             # check the device. A failed preliminary listing must not abort
