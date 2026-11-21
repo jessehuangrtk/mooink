@@ -309,6 +309,19 @@ class MooinkSleepUI:
         try:
             while True:
                 title, result, error, callback = self._messages.get_nowait()
+                if title == "__delete_progress__":
+                    info = result
+                    labels = {
+                        "deleted": "已刪除", "pending": "刪除待確認",
+                        "skipped": "已跳過", "failed": "失敗／待檢查",
+                    }
+                    row = info["record"]
+                    label = labels.get(row["status"], row["status"])
+                    self.status.set("備份並刪除 %d/%d：%s（%s）" %
+                                    (info["index"], info["total"], row["name"], label))
+                    self._log("第 %d/%d 張：%s → %s" %
+                              (info["index"], info["total"], row["name"], label))
+                    continue
                 self._busy = False
                 self.progress.stop()
                 if error:
@@ -530,7 +543,9 @@ class MooinkSleepUI:
             return
         if not messagebox.askyesno(
             "確認備份並刪除",
-            "即將對 %d 張圖片逐一執行「先備份、驗證，再要求刪除」。\n\n%s\n\n確定繼續？" %
+            "將逐張執行：備份 → 驗證 → 刪除，再處理下一張。\n"
+            "單張失敗會跳過，不影響後續圖片；結束時列出完整結果。\n"
+            "MTP 刪除命令送出後仍須確認。\n\n共 %d 張：\n%s\n\n確定繼續？" %
             (len(names), "\n".join(names[:10]) + ("\n…" if len(names) > 10 else "")),
         ):
             return
@@ -539,14 +554,79 @@ class MooinkSleepUI:
 
         def operation(io):
             manager = SleepScreenManager(io_layer=io, **options)
-            return manager.manage(files=names, operation="delete", backup_dir=back_dir, confirm=False)
+
+            def progress(index, total, record):
+                # Worker thread must not update any Tk widget directly.
+                self._messages.put(("__delete_progress__", {
+                    "index": index, "total": total, "record": record,
+                }, None, None))
+
+            return manager.manage(
+                files=names, operation="delete", backup_dir=back_dir,
+                confirm=False, continue_on_error=True, on_result=progress,
+            )
 
         def done(result):
-            for name, state in result:
-                self._log("備份／刪除 %s：%s" % (name, state))
-            self._log("Windows MTP 刪除為非同步要求；請重新讀取清單確認是否真的刪除。")
+            for row in result:
+                self._log("%s：%s — %s" %
+                          (row["name"], row["status"], row["detail"]))
+            # The old list is no longer safe to act upon after the batch.
+            self._invalidate_sleep()
+            self._show_delete_report(result)
 
         self._device_job("備份並刪除", operation, done, writing=True)
+
+    def _show_delete_report(self, records):
+        labels = {
+            "deleted": "已確認刪除",
+            "pending": "刪除已要求，待確認",
+            "skipped": "已跳過",
+            "failed": "失敗／需檢查",
+        }
+        counts = {key: sum(row["status"] == key for row in records)
+                  for key in labels}
+        summary = ("共 %d 張｜已確認刪除 %d｜待確認 %d｜跳過 %d｜失敗 %d" %
+                   (len(records), counts["deleted"], counts["pending"],
+                    counts["skipped"], counts["failed"]))
+        lines = [summary, "",
+                 "每張均先備份驗證，成功才會送出該張的刪除要求。",
+                 "USB MTP 的刪除可能非同步；請重新讀取 sleep 清單確認。",
+                 "失敗檔案不再自動重試，避免重複操作。", ""]
+        for index, row in enumerate(records, 1):
+            lines.append("%03d. [%s] %s" %
+                         (index, labels.get(row["status"], row["status"]), row["name"]))
+            lines.append("     " + row["detail"])
+        report = "\n".join(lines)
+        self._log(summary)
+
+        window = tk.Toplevel(self.root)
+        window.title("備份並刪除 — 逐檔結果")
+        window.geometry("820x540")
+        window.minsize(600, 350)
+        window.transient(self.root)
+        layout = ttk.Frame(window, padding=14)
+        layout.pack(fill="both", expand=True)
+        ttk.Label(layout, text=summary, wraplength=760).pack(anchor="w", pady=(0, 10))
+        frame = ttk.Frame(layout)
+        frame.pack(fill="both", expand=True)
+        details = tk.Text(frame, wrap="word", height=16)
+        bar = ttk.Scrollbar(frame, orient="vertical", command=details.yview)
+        details.configure(yscrollcommand=bar.set)
+        details.pack(side="left", fill="both", expand=True)
+        bar.pack(side="left", fill="y")
+        details.insert("1.0", report)
+        details.configure(state="disabled")
+        buttons = ttk.Frame(layout)
+        buttons.pack(fill="x", pady=(12, 0))
+
+        def copy_report():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(report)
+
+        ttk.Button(buttons, text="複製完整清單", command=copy_report).pack(side="left")
+        ttk.Button(buttons, text="關閉", command=window.destroy).pack(side="right")
+        window.grab_set()
+        window.focus_set()
 
     def _probe_wifi(self):
         ip = self.device_ip.get().strip()
