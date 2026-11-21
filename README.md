@@ -68,6 +68,22 @@ py mook_sleep_screen_manager_ui.py
 
 **限制：** 直接 WPD 已經做模擬測試，但**尚未在實際 mooInk 上測試其裝置名稱、MTP 路徑與刪除支援**。若缺少額外函式庫或不符合唯一裝置條件，GUI 會明確報告並停止；**不會悄悄退回 Explorer 逐張確認模式**。CLI 原本的 Shell 模式仍保留，方便相容性研究。
 
+## USB 上傳：即時進度與完整性確認
+
+GUI 的 **「選擇 JPG / PNG 上傳」** 使用 `mook_sleep_screen_manager.py` 的統一後端；USB 傳輸則改由 `mook_mtp_wpd.py` 的 **WPD 直接上傳**（不再依賴 Windows Shell 非同步 `CopyHere`）。
+
+- 在「裝置 / sleep 管理」可看到 **整批進度條、單張活動進度、目前檔名／階段與已等待秒數**。WPD `upload_file` 不提供逐位元組 callback，因此不能以虛構百分比表示真正的傳輸量；單張進度條在寫入期間會持續動畫。
+- 逐檔流程：避免同名覆寫 → WPD 寫入 `sleep` → 重新讀取 `sleep` 目錄確認檔案存在 → 從裝置讀回本機暫存 → **SHA-256 比對一致**才標示 `verified`。
+- 全部結束顯示每張的 **已驗證／同名跳過／失敗／未執行**，並重新列出裝置的 `sleep` 圖片。
+- 如果 WPD 連線或識別失敗，不會退回 Windows Shell `CopyHere`。若裝置上傳失敗並留有部分檔案，不會擅自刪除遠端檔案；請重新讀取清單檢查。
+- WPD 函式庫 `Heribert17/mtp` 上游目前以 **Python 3.12+、Windows 10／11** 進行測試。安裝指令：
+  
+  ~~~powershell
+  py -m pip install "git+https://github.com/Heribert17/mtp.git"
+  ~~~
+
+**驗收限制：** GUI、WPD 傳輸及檔案回讀已有模擬測試，但尚未實機確認你的 mooInk 可接受直接 WPD 上傳。若失敗，將錯誤訊息貼回，不能把「送出命令」誤當成「畫面更新」。即使檔案上傳成功，電子紙也不一定立即重繪休眠畫面。
+
 ## USB MTP 備份診斷與安全保護
 
 **建議先做單張備份測試，不要直接對全部圖片執行刪除：**
