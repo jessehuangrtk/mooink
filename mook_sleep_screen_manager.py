@@ -111,7 +111,11 @@ class MooinkLowLevel:
         return [str(item.Name) for item in devices]
 
     def _choose_usb(self):
-        devices = self.usb_devices() if self._usb_devices is None else self._usb_devices
+        # usb_devices() returns display names but caches Shell COM items.
+        # Always select from cached objects, never from name strings.
+        if self._usb_devices is None:
+            self.usb_devices()
+        devices = self._usb_devices
         if not devices:
             raise RuntimeError("Windows 本機中沒有可存取的 mooInk MTP 裝置")
         if self.usb_index is None:
@@ -219,7 +223,7 @@ class MooinkLowLevel:
             time.sleep(0.8)
         return "copy-requested-verification-pending"
 
-    def backup_and_delete(self, filename: str, backup_dir: Path):
+    def backup_and_delete(self, filename: str, backup_dir: Path, *, confirm_delete=True):
         if Path(filename).name != filename or Path(filename).suffix.lower() not in OUTPUT_EXTS:
             raise ValueError("只能刪除 sleep 根目錄下的 JPG/PNG，且不可使用路徑")
         target = self._target(write=True)
@@ -255,7 +259,7 @@ class MooinkLowLevel:
             time.sleep(0.8)
         else:
             raise RuntimeError("USB MTP 備份未完成或大小不符；不刪除原檔")
-        if not question("確定刪除 mooInk 的 %s？已備份到 %s" % (filename, backup)):
+        if confirm_delete and not question("確定刪除 mooInk 的 %s？已備份到 %s" % (filename, backup)):
             return "cancelled-after-backup: " + str(backup)
         item.InvokeVerb("delete")
         # In MTP mode delete can be asynchronous and/or require Explorer UI.
@@ -429,7 +433,7 @@ class SleepScreenManager:
                    "note": "Images may not refresh until reader transitions through real sleep."}
         (self.output_dir / "manifest.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def manage(self, files=None, operation="list", backup_dir="mooink_backup"):
+    def manage(self, files=None, operation="list", backup_dir="mooink_backup", *, confirm=True):
         if self.io is None:
             raise RuntimeError("尚未指定 USB 或已掛載的 Wi-Fi sleep 目錄")
         if operation == "list":
@@ -450,9 +454,12 @@ class SleepScreenManager:
             print("將先備份每個 JPG/PNG，然後刪除以下 sleep 圖片（不動其他檔案）：")
             for name in names:
                 print("  " + name)
-            if not question("確定執行？", default=False):
+            # A GUI may confirm on the main thread, then pass confirm=False.
+            # CLI callers keep the original interactive confirmation prompts.
+            if confirm and not question("確定執行？", default=False):
                 return ["cancelled"]
-            return [(name, self.io.backup_and_delete(name, Path(backup_dir))) for name in names]
+            return [(name, self.io.backup_and_delete(
+                name, Path(backup_dir), confirm_delete=confirm)) for name in names]
         raise ValueError("Unsupported operation: " + operation)
 
     def interactive(self):
