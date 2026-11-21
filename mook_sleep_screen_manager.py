@@ -241,7 +241,9 @@ class MooinkLowLevel:
             if not backup.exists() or backup.stat().st_size != src.stat().st_size:
                 raise RuntimeError("備份驗證失敗，拒絕刪除")
             src.unlink()
-            return str(backup)
+            if src.exists():
+                raise RuntimeError("共享資料夾刪除結果未確認，請手動檢查；備份已保留：" + str(backup))
+            return "deleted+verified; backup: " + str(backup)
         # Windows MTP Shell manages the actual delete. It may show UI.
         item = next((x for x in target.Items() if str(x.Name) == filename), None)
         if item is None:
@@ -433,7 +435,17 @@ class SleepScreenManager:
                    "note": "Images may not refresh until reader transitions through real sleep."}
         (self.output_dir / "manifest.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def manage(self, files=None, operation="list", backup_dir="mooink_backup", *, confirm=True):
+    def manage(self, files=None, operation="list", backup_dir="mooink_backup",
+               *, confirm=True, continue_on_error=False, on_result=None):
+        """Manage sleep files. Batch deletion can report every file separately.
+
+        continue_on_error=True returns a list of records:
+          {name, status=deleted|pending|skipped|failed, detail}.
+        Each file is independently backed up and verified before deletion.
+        on_result(index, total, record) is called after each attempt, on the
+        caller's thread (GUI callers must marshal UI changes to Tk's thread).
+        Without continue_on_error the original tuple return format remains.
+        """
         if self.io is None:
             raise RuntimeError("尚未指定 USB 或已掛載的 Wi-Fi sleep 目錄")
         if operation == "list":
@@ -446,9 +458,15 @@ class SleepScreenManager:
                 result.append((str(path), self.io.add_file(Path(path))))
             return result
         if operation in ("delete", "clear"):
-            current = self.io.list_sleep()
-            names = ([str(f) for f in files] if operation == "delete" and files else
-                     [f["name"] for f in current] if operation == "clear" else [])
+            # For explicit selections, let each individual backup_and_delete
+            # check the device. A failed preliminary listing must not abort
+            # the entire batch before any per-file errors can be recorded.
+            if operation == "delete" and files:
+                names = [str(f) for f in files]
+            elif operation == "clear":
+                names = [f["name"] for f in self.io.list_sleep()]
+            else:
+                names = []
             if not names:
                 return []
             # The GUI already confirmed through its dialog; do not print
@@ -459,8 +477,41 @@ class SleepScreenManager:
                     print("  " + name)
                 if not question("確定執行？", default=False):
                     return ["cancelled"]
-            return [(name, self.io.backup_and_delete(
-                name, Path(backup_dir), confirm_delete=confirm)) for name in names]
+            if not continue_on_error:
+                return [(name, self.io.backup_and_delete(
+                    name, Path(backup_dir), confirm_delete=confirm)) for name in names]
+
+            # One file at a time: BACKUP -> VERIFY -> DELETE, then next.
+            # A failed backup never requests a delete for that file.
+            results = []
+            total = len(names)
+            for index, name in enumerate(names, 1):
+                try:
+                    detail = str(self.io.backup_and_delete(
+                        name, Path(backup_dir), confirm_delete=confirm))
+                    if detail.startswith("deleted+verified;"):
+                        status = "deleted"
+                    elif detail.startswith("cancelled-after-backup:"):
+                        status = "skipped"
+                    else:
+                        # Windows Shell/MTP deletion is asynchronous. A
+                        # completed call is NOT proof that the file disappeared.
+                        status = "pending"
+                    record = {"name": name, "status": status, "detail": detail}
+                except Exception as exc:
+                    record = {
+                        "name": name, "status": "failed",
+                        "detail": type(exc).__name__ + ": " + str(exc),
+                    }
+                results.append(record)
+                if on_result is not None:
+                    try:
+                        on_result(index, total, record)
+                    except Exception:
+                        # A broken progress reporter must not interrupt a
+                        # safety-critical batch or cause a repeated deletion.
+                        pass
+            return results
         raise ValueError("Unsupported operation: " + operation)
 
     def interactive(self):
