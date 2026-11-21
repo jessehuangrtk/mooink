@@ -53,8 +53,8 @@ class BothSizesConversionTests(unittest.TestCase):
             )
             self.assertEqual(set(groups), {"10.3", "13.3"})
             self.assertEqual([len(groups[k]) for k in ("10.3", "13.3")], [1, 1])
-            self.assertEqual(groups["10.3"][0].parent, out / "10.3")
-            self.assertEqual(groups["13.3"][0].parent, out / "13.3")
+            self.assertEqual(groups["10.3"][0].parent.resolve(), (out / "10.3").resolve())
+            self.assertEqual(groups["13.3"][0].parent.resolve(), (out / "13.3").resolve())
             self.assertNotEqual(groups["10.3"][0], groups["13.3"][0])
             for size, expected in (("10.3", (1404, 1872)),
                                    ("13.3", (1650, 2200))):
