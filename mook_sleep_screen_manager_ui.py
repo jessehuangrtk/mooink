@@ -52,6 +52,7 @@ class MooinkSleepUI:
         self._backup_stage_start = 0.0
         self._backup_current = ("", 0, "")
         self._backup_wait_limit = 50
+        self._transfer_kind = "備份並刪除"
         self._inputs: list[str] = []
         self._converted: list[Path] = []
         self._device_names: list[str] = []
@@ -237,7 +238,7 @@ class MooinkSleepUI:
         ).pack(side="left")
         ttk.Label(controls, text="秒", style="Subtitle.TLabel").pack(side="left", padx=4)
 
-        transfer = ttk.LabelFrame(storage, text="  備份與刪除 · 即時進度  ", padding=(10, 6))
+        transfer = ttk.LabelFrame(storage, text="  上傳／備份／刪除 · 即時進度  ", padding=(10, 6))
         transfer.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         transfer.columnconfigure(0, weight=1)
         ttk.Label(transfer, textvariable=self.backup_batch_label).grid(
@@ -254,7 +255,7 @@ class MooinkSleepUI:
                   style="Subtitle.TLabel").grid(row=4, column=0, sticky="w")
         ttk.Label(
             transfer, style="Subtitle.TLabel",
-            text="USB 批次刪除改用直接 WPD（需另裝套件），整批只確認一次，不呼叫檔案總管逐張確認。",
+            text="USB 上傳：WPD 直接寫入、再讀回 SHA-256 驗證；無傳輸位元組回報時顯示活動進度。",
         ).grid(row=5, column=0, sticky="w", pady=(3, 0))
 
         tree_frame = ttk.Frame(storage)
@@ -375,19 +376,21 @@ class MooinkSleepUI:
         try:
             while True:
                 title, result, error, callback = self._messages.get_nowait()
-                if title == "__delete_stage__":
+                if title in ("__delete_stage__", "__upload_stage__"):
                     self._handle_backup_stage(result)
                     continue
-                if title == "__delete_progress__":
+                if title in ("__delete_progress__", "__upload_progress__"):
                     info = result
                     labels = {
                         "deleted": "已刪除", "pending": "刪除待確認",
                         "skipped": "已跳過", "failed": "失敗／待檢查",
                         "blocked": "前一檔發生系統性問題，未執行",
+                        "verified": "已驗證上傳",
                     }
                     row = info["record"]
                     label = labels.get(row["status"], row["status"])
-                    self.status.set("備份並刪除 %d/%d：%s（%s）" %
+                    self.status.set("%s %d/%d：%s（%s）" %
+                                    (self._transfer_kind,
                                     (info["index"], info["total"], row["name"], label))
                     self.backup_batch_bar["value"] = 100 * info["index"] / info["total"]
                     self.backup_batch_label.set("批次進度：%d / %d（%.0f%%）" %
@@ -396,7 +399,7 @@ class MooinkSleepUI:
                     self._log("第 %d/%d 張：%s → %s" %
                               (info["index"], info["total"], row["name"], label))
                     continue
-                if title in ("備份並刪除", "備份測試"):
+                if title in ("備份並刪除", "備份測試", "上傳 sleep 圖片"):
                     self._end_backup_progress()
                 self._busy = False
                 self.progress.stop()
@@ -418,7 +421,8 @@ class MooinkSleepUI:
         self.root.after(100, self._drain)
 
 
-    def _begin_backup_progress(self, count, wait_limit):
+    def _begin_backup_progress(self, count, wait_limit, kind="備份並刪除"):
+        self._transfer_kind = kind
         self._backup_active = True
         self._backup_started = time.monotonic()
         self._backup_stage_start = self._backup_started
@@ -441,9 +445,9 @@ class MooinkSleepUI:
         if changed:
             self._backup_stage_start = time.monotonic()
             self._backup_current = (name, index, phase)
-            if phase in ("locate", "backup_target", "copying", "verifying", "deleting",
-                         "pending", "blocked", "verified",
-                         "deleted", "failed", "skipped"):
+            if phase in ("locate", "backup_target", "copying", "uploading",
+                         "checking", "verifying", "deleting", "pending",
+                         "blocked", "verified", "deleted", "failed", "skipped"):
                 self._log("第 %d/%d 張 %s：%s" %
                           (index, info["total"], name, row.get("message", phase)))
 
@@ -451,14 +455,16 @@ class MooinkSleepUI:
             "locate": "尋找圖片／準備備份",
             "backup_target": "本機備份位置已確認",
             "copying": "備份中（等待 MTP）",
-            "verifying": "正在驗證備份",
+            "uploading": "正在寫入 mooInk（WPD 傳輸中，無逐位元組回報）",
+            "checking": "正在確認 mooInk 已建立檔案",
+            "verifying": "正在驗證檔案完整性",
             "deleting": "送出刪除命令",
             "pending": "刪除待確認",
             "deleted": "已確認刪除",
             "failed": "失敗／需檢查原檔與備份（本次不重試）",
             "skipped": "已跳過",
             "blocked": "前一檔發生系統性問題，未執行",
-            "verified": "單張備份驗證完成（原檔保留）",
+            "verified": "檔案已驗證完成",
         }
         phase_label = labels.get(phase, phase)
         copied = row.get("copied")
@@ -487,16 +493,20 @@ class MooinkSleepUI:
 
         self.backup_file_label.set(
             "第 %d/%d 張：%s — %s" % (index, info["total"], name, phase_label))
-        self.status.set("備份並刪除：" + phase_label)
+        self.status.set(self._transfer_kind + "：" + phase_label)
 
     def _backup_tick(self):
         # Stays responsive even if Shell.CopyHere blocks in the worker.
         if self._backup_active:
             elapsed = int(time.monotonic() - self._backup_started)
             stage_seconds = int(time.monotonic() - self._backup_stage_start)
-            self.backup_elapsed_label.set(
-                "總經過 %d 秒｜目前階段 %d 秒｜MTP 備份逾時設定 %d 秒/張"
-                % (elapsed, stage_seconds, self._backup_wait_limit))
+            if self._transfer_kind.startswith("上傳"):
+                timer = "總經過 %d 秒｜目前階段 %d 秒｜等待裝置傳輸與回讀驗證" % (
+                    elapsed, stage_seconds)
+            else:
+                timer = "總經過 %d 秒｜目前階段 %d 秒｜MTP 備份逾時設定 %d 秒/張" % (
+                    elapsed, stage_seconds, self._backup_wait_limit)
+            self.backup_elapsed_label.set(timer)
         self.root.after(350, self._backup_tick)
 
     def _end_backup_progress(self):
@@ -505,7 +515,9 @@ class MooinkSleepUI:
         self.backup_file_bar.configure(mode="determinate", maximum=100)
         self.backup_file_bar["value"] = 100
         self.backup_elapsed_label.set(
-            "操作已結束；若顯示刪除待確認，請重新讀取裝置清單。")
+            "操作已結束；請查看逐檔驗證結果，未驗證的上傳不視為成功。"
+            if self._transfer_kind.startswith("上傳")
+            else "操作已結束；若顯示刪除待確認，請重新讀取裝置清單。")
 
     @staticmethod
     def _com_call(action):
@@ -669,6 +681,9 @@ class MooinkSleepUI:
                                    values=(row["name"], "未知" if size is None else "%0.1f KB" % (size / 1024)))
 
     def _upload(self):
+        if self._busy:
+            messagebox.showinfo("操作進行中", "請先完成目前的裝置操作。")
+            return
         paths = filedialog.askopenfilenames(
             title="選擇要新增至 mooInk sleep 的 JPG/PNG",
             initialdir=self.output_dir.get() if Path(self.output_dir.get()).is_dir() else None,
@@ -676,8 +691,17 @@ class MooinkSleepUI:
         )
         if not paths:
             return
+        try:
+            expected = self._transport_snapshot()
+        except ValueError as exc:
+            messagebox.showwarning("未選擇裝置", str(exc))
+            return
         if not messagebox.askyesno(
-            "確認新增", "要新增 %d 張圖片至 sleep 嗎？\n已有同名檔案時會拒絕覆寫。" % len(paths),
+            "確認上傳",
+            "將上傳 %d 張 JPG/PNG 至 mooInk sleep。\\n"
+            "USB 改用 WPD 直接寫入；每張會從裝置讀回並比較 SHA-256，"
+            "只把驗證成功的檔案列為完成。\\n"
+            "同名檔案不覆寫，整批只確認這一次。\\n\\n確定繼續？" % len(paths),
         ):
             return
 
@@ -685,14 +709,72 @@ class MooinkSleepUI:
 
         def operation(io):
             manager = SleepScreenManager(io_layer=io, **options)
-            return manager.manage(files=list(paths), operation="add")
+
+            def stage(index, total, event):
+                self._messages.put(("__upload_stage__", {
+                    "index": index, "total": total, "event": event,
+                }, None, None))
+
+            def progress(index, total, record):
+                self._messages.put(("__upload_progress__", {
+                    "index": index, "total": total, "record": record,
+                }, None, None))
+
+            records = manager.manage(
+                files=list(paths), operation="add",
+                continue_on_error=True, on_stage=stage, on_result=progress,
+            )
+            refresh_rows = None
+            refresh_error = None
+            try:
+                if expected["transport"] == "usb":
+                    from mook_mtp_wpd import list_images
+                    refresh_rows = list_images()
+                else:
+                    refresh_rows = io.list_sleep()
+            except Exception as exc:
+                refresh_error = "%s: %s" % (type(exc).__name__, exc)
+            return records, refresh_rows, refresh_error
 
         def done(result):
-            for path, state in result:
-                self._log("上傳 %s：%s" % (Path(path).name, state))
-            self._log("若回報 verification-pending，表示尚未確認 USB 傳輸完成，請重新讀取清單。")
+            records, rows, refresh_error = result
+            counts = {
+                "verified": sum(r["status"] == "verified" for r in records),
+                "skipped": sum(r["status"] == "skipped" for r in records),
+                "failed": sum(r["status"] == "failed" for r in records),
+                "blocked": sum(r["status"] == "blocked" for r in records),
+            }
+            for row in records:
+                self._log("上傳 %s：%s — %s" %
+                          (row["name"], row["status"], row["detail"]))
+            summary = ("上傳結果：已驗證 %d｜同名跳過 %d｜失敗 %d｜未執行 %d" %
+                       (counts["verified"], counts["skipped"],
+                        counts["failed"], counts["blocked"]))
+            self._log(summary)
+            try:
+                now = self._transport_snapshot()
+            except ValueError:
+                now = None
+            if rows is not None and now == expected:
+                self._replace_sleep(rows)
+                self._sleep_identity = expected
+                self._log("裝置 sleep 清單已更新：%d 張" % len(rows))
+            elif rows is not None:
+                self._invalidate_sleep()
+                self._log("裝置選擇已改變，已捨棄過期的上傳後清單。")
+            else:
+                self._log("上傳後重新讀取 sleep 清單失敗：" +
+                          (refresh_error or "未知原因"))
+            details = [summary, ""]
+            for index, row in enumerate(records, 1):
+                details.append("%02d. [%s] %s — %s" %
+                               (index, row["status"], row["name"], row["detail"]))
+            if refresh_error:
+                details.append("\\n清單更新失敗：" + refresh_error)
+            messagebox.showinfo("mooInk sleep 上傳結果", "\\n".join(details))
 
-        self._device_job("新增 sleep 圖片", operation, done, writing=True)
+        self._device_job("上傳 sleep 圖片", operation, done, writing=True,
+                         backup_batch=(len(paths), 0, "上傳 sleep 圖片"))
 
     def _backup_test(self):
         """Copy one selected sleep image to PC; NEVER issue delete."""
