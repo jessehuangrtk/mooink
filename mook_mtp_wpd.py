@@ -42,11 +42,18 @@ def _device_name(device):
 
 
 def _choose_device(devices):
-    matches = [
-        dev for dev in devices
-        if "mooink" in _device_name(dev).casefold()
-        or "readmoo" in _device_name(dev).casefold()
-    ]
+    # Name can be "Digital Paper" instead of mooInk. A specific first-gen
+    # reader was observed with USB VID_1F85/PID_4E16; device._p_id is the
+    # upstream mtp.win_access PortableDevice WPD/PnP device identifier.
+    # Requiring exactly one match still prevents cross-device writes.
+    def known_reader(dev):
+        name = _device_name(dev).casefold()
+        pnp = str(getattr(dev, "_p_id", "") or "").casefold()
+        return (
+            "mooink" in name or "readmoo" in name
+            or ("vid_1f85" in pnp and "pid_4e16" in pnp)
+        )
+    matches = [dev for dev in devices if known_reader(dev)]
     if len(matches) != 1:
         raise QuietMtpUnavailable(
             "WPD 找不到唯一的 mooInk/Readmoo 裝置（符合 %d 台，全部 %d 台）。"
