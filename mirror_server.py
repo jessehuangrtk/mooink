@@ -129,7 +129,7 @@ class MirrorHandler(BaseHTTPRequestHandler):
         except (OSError, TimeoutError):
             self.close_connection = True
             return
-        if len(data) != size or not data.startswith(b"\\xff\\xd8") or not data.endswith(b"\\xff\\xd9"):
+        if len(data) != size or not data.startswith(bytes.fromhex("ffd8")) or not data.endswith(bytes.fromhex("ffd9")):
             self._json(400, {"error": "invalid or truncated JPEG"})
             return
         seq = self.server.frames.save(data)
