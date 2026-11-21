@@ -213,3 +213,120 @@ def backup_and_delete_one(filename, backup_dir, *,
                     close()
                 except Exception:
                     pass
+
+
+
+def upload_one(source, *, progress=None, device_source=None):
+    """Upload JPG/PNG to the unique mooInk sleep folder and read it back.
+
+    Returns only a VERIFIED result after checking local and remote SHA256.
+    The upstream WPD upload_file() method is synchronous but does not expose
+    progress; callers show an indeterminate activity bar while it runs.
+
+    A failed verification leaves the remote file untouched for diagnosis;
+    never delete a partially created file automatically.
+    """
+    path = Path(source).expanduser().resolve()
+    if not path.is_file() or path.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+        raise ValueError("WPD 僅允許上傳存在的 JPG/JPEG/PNG 圖片")
+    if path.stat().st_size <= 0:
+        raise ValueError("不能上傳空白檔案")
+    expected_bytes = path.stat().st_size
+    _report(progress, "locate", message="WPD 搜尋 mooInk sleep 資料夾")
+
+    if device_source is None:
+        if os.name != "nt":
+            raise QuietMtpUnavailable("USB WPD 上傳僅支援 Windows")
+        try:
+            from mtp.win_access import get_portable_devices
+        except (ImportError, RuntimeError) as exc:
+            raise QuietMtpUnavailable(
+                "WPD 上傳需要安裝 mtp 套件；請在 Windows Python 3.12+ 執行 "
+                "py -m pip install git+https://github.com/Heribert17/mtp.git"
+            ) from exc
+        devices = list(get_portable_devices())
+    else:
+        devices = list(device_source())
+
+    try:
+        device = _choose_device(devices)
+        sleep = _sleep_directory(device)
+        candidates = [
+            obj for obj in sleep.get_children()
+            if str(getattr(obj, "name", "")).casefold() == path.name.casefold()
+        ]
+        if candidates:
+            raise FileExistsError(
+                "mooInk sleep 已有同名圖片 %s；為避免覆寫，未進行上傳" % path.name
+            )
+        _report(progress, "uploading", copied=0, total=expected_bytes,
+                message="正在透過 WPD 傳輸 %s（Windows 無位元組進度回報）" % path.name)
+        try:
+            sleep.upload_file(path.name, str(path))
+        except Exception as exc:
+            raise RuntimeError(
+                "WPD 上傳發生錯誤；裝置可能留下未完成檔案，請重新讀取 sleep 清單再處理。"
+                "原始錯誤：%s: %s" % (type(exc).__name__, exc)
+            ) from exc
+
+        _report(progress, "checking", message="上傳指令已返回，正在重新讀取 mooInk 目錄")
+        uploaded = None
+        for _ in range(8):
+            matches = [
+                obj for obj in sleep.get_children()
+                if str(getattr(obj, "name", "")).casefold() == path.name.casefold()
+                and int(getattr(obj, "content_type", -1)) == 2
+            ]
+            if len(matches) > 1:
+                raise RuntimeError("WPD 目錄出現多個同名物件，無法確認上傳")
+            if matches:
+                uploaded = matches[0]
+                break
+            time.sleep(0.5)
+        if uploaded is None:
+            raise RuntimeError(
+                "WPD 已回傳，但 sleep 內找不到 %s；不宣稱上傳成功" % path.name
+            )
+
+        remote_size = int(getattr(uploaded, "size", -1) or -1)
+        if remote_size > 0 and remote_size != expected_bytes:
+            raise RuntimeError(
+                "WPD 上傳大小不符：來源 %d bytes，裝置 %d bytes；不宣稱成功" %
+                (expected_bytes, remote_size)
+            )
+
+        _report(progress, "verifying", message="正在從 mooInk 讀回檔案並比對 SHA-256",
+                copied=expected_bytes, total=expected_bytes)
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="mooink_upload_check_") as tmp:
+            back = Path(tmp) / path.name
+            uploaded.download_file(str(back))
+            if back.stat().st_size != expected_bytes:
+                raise RuntimeError(
+                    "WPD 回讀大小不符：來源 %d bytes，回讀 %d bytes；不宣稱成功" %
+                    (expected_bytes, back.stat().st_size)
+                )
+
+            def digest(src):
+                h = hashlib.sha256()
+                with src.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        h.update(chunk)
+                return h.hexdigest()
+
+            if digest(back) != digest(path):
+                raise RuntimeError(
+                    "WPD 回讀 SHA-256 不一致，無法確認裝置檔案完整；請檢查 sleep"
+                )
+
+        _report(progress, "verified", copied=expected_bytes, total=expected_bytes,
+                message="裝置回讀 SHA-256 一致，已確認上傳")
+        return "uploaded+sha256-verified; sleep: " + path.name
+    finally:
+        for device in devices:
+            close = getattr(device, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
