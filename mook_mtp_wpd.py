@@ -330,3 +330,42 @@ def upload_one(source, *, progress=None, device_source=None):
                     close()
                 except Exception:
                     pass
+
+
+
+def list_images(*, device_source=None):
+    """List JPG/PNG files directly from WPD after a verified upload."""
+    if device_source is None:
+        if os.name != "nt":
+            raise QuietMtpUnavailable("WPD USB 清單僅支援 Windows")
+        try:
+            from mtp.win_access import get_portable_devices
+        except (ImportError, RuntimeError) as exc:
+            raise QuietMtpUnavailable(
+                "WPD 清單需要安裝 mtp 套件，請安裝並重新啟動 GUI"
+            ) from exc
+        devices = list(get_portable_devices())
+    else:
+        devices = list(device_source())
+    try:
+        sleep = _sleep_directory(_choose_device(devices))
+        output = []
+        for item in sleep.get_children():
+            name = str(getattr(item, "name", ""))
+            if Path(name).name != name:
+                continue
+            if Path(name).suffix.lower() not in (".jpg", ".jpeg", ".png"):
+                continue
+            if int(getattr(item, "content_type", -1)) != 2:
+                continue
+            size = int(getattr(item, "size", -1) or -1)
+            output.append({"name": name, "size": size if size > 0 else None})
+        return sorted(output, key=lambda row: row["name"].casefold())
+    finally:
+        for device in devices:
+            close = getattr(device, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
