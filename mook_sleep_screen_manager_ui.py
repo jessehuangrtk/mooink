@@ -22,6 +22,7 @@ from tkinter import filedialog, messagebox, ttk
 from mook_sleep_screen_manager import (
     MooinkLowLevel,
     SleepScreenManager,
+    cleanup_empty_backup_dirs,
 )
 
 
@@ -272,6 +273,8 @@ class MooinkSleepUI:
         ttk.Label(back, text="備份資料夾").pack(side="left")
         ttk.Entry(back, textvariable=self.backup_dir).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(back, text="瀏覽", command=self._choose_backup).pack(side="left")
+        ttk.Button(back, text="清理空白備份子目錄",
+                   command=self._cleanup_empty_backups).pack(side="left", padx=(8, 0))
 
     def _build_logs(self, tab):
         ttk.Label(tab, text="操作結果：傳輸請求與驗證狀態分開呈現，不會把非同步請求誤報為已完成。").pack(anchor="w")
@@ -299,6 +302,30 @@ class MooinkSleepUI:
         path = filedialog.askdirectory(title="選擇備份目錄")
         if path:
             self.backup_dir.set(path)
+
+    def _cleanup_empty_backups(self):
+        """Remove ONLY empty auto-generated backup subfolders, never files."""
+        if self._busy:
+            messagebox.showwarning("操作進行中", "備份或傳輸還在進行，不能清理資料夾。")
+            return
+        root = self.backup_dir.get().strip()
+        if not root:
+            messagebox.showwarning("缺少備份位置", "請先指定備份目錄。")
+            return
+        if not messagebox.askyesno(
+                "清理空白備份子目錄",
+                "只清理 %s 下名稱符合 mooink_YYYYMMDD_HHMMSS_NNN "
+                "且真正空白的直接子目錄。\n"
+                "不會刪除任何檔案、不會清理其他資料夾，也不會清理 mooInk 裝置。\n"
+                "請先確認 Windows 沒有正在複製檔案。\n\n確定繼續？" % root):
+            return
+        try:
+            removed = cleanup_empty_backup_dirs(root)
+        except OSError as exc:
+            messagebox.showerror("清理失敗", str(exc))
+            return
+        self._log("清理空白備份子目錄：%d 個（未刪除檔案）" % len(removed))
+        messagebox.showinfo("清理完成", "已清理 %d 個空白子目錄。\n沒有刪除任何圖片或其他檔案。" % len(removed))
 
     def _choose_share(self):
         path = filedialog.askdirectory(title="選擇已掛載的 sleep 資料夾")
@@ -711,10 +738,15 @@ class MooinkSleepUI:
             self.backup_batch_bar["value"] = 100
             self.backup_batch_label.set("單張備份測試：1 / 1")
             self._log("單張備份測試完成：" + result)
+            if result.startswith("backup-only-unverified-source-size;"):
+                note = ("來源檔案大小未知，僅確認本機圖片可完整解碼；"
+                        "尚未證實它與裝置來源一致，禁止自動刪除。")
+            else:
+                note = ("本機檔案大小與裝置回報大小一致，"
+                        "但尚未逐位元組驗證。")
             messagebox.showinfo(
-                "備份測試完成", result +
-                "\n\n僅代表本機備份大小符合裝置回報大小，"
-                "不代表已逐位元組比對。mooInk 原檔未被刪除。"
+                "備份測試完成", result + "\n\n" + note +
+                "\nmooInk 原檔未被刪除。"
             )
 
         self._device_job("備份測試", operation, done, writing=True,
@@ -741,7 +773,7 @@ class MooinkSleepUI:
         if not messagebox.askyesno(
             "確認備份並刪除",
             "將逐張執行：備份 → 驗證 → 刪除，再處理下一張。\n"
-            "一般單張失敗會跳過；若 Windows MTP 複製完全沒啟動，"
+            "一般單張失敗會跳過；若 Windows MTP 缺少來源大小、複製無法開始，"
             "或刪除無法確認，為避免空轉／誤操作，會停止本次剩餘檔案。\n"
             "建議先執行「單張備份測試（不刪除）」。\n"
             "MTP 刪除命令送出後仍須確認。\n\n共 %d 張：\n%s\n\n確定繼續？" %
