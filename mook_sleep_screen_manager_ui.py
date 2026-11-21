@@ -12,6 +12,8 @@ Do not treat an MTP asynchronous CopyHere/delete request as confirmed.
 
 from __future__ import annotations
 
+import json
+import os
 import queue
 import threading
 import time
@@ -23,7 +25,42 @@ from mook_sleep_screen_manager import (
     MooinkLowLevel,
     SleepScreenManager,
     cleanup_empty_backup_dirs,
+    convert_both_sizes,
 )
+
+
+
+def device_settings_path():
+    """The device display size belongs to the user's Windows profile."""
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        return Path(base) / "mooink" / "sleep_manager_ui_settings.json"
+    return Path.home() / ".config" / "mooink" / "sleep_manager_ui_settings.json"
+
+
+def load_device_size(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        size = data.get("device_size")
+        if size in ("10.3", "13.3"):
+            return size
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return "13.3"
+
+
+def save_device_size(path, size):
+    """Write size only, atomically; no device IDs, IPs, or secrets."""
+    if size not in ("10.3", "13.3"):
+        raise ValueError("未知 mooInk 螢幕尺寸")
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    temp = dest.with_name(dest.name + ".tmp")
+    temp.write_text(
+        json.dumps({"device_size": size}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temp.replace(dest)
 
 
 class MooinkSleepUI:
@@ -36,7 +73,9 @@ class MooinkSleepUI:
 
         self.output_dir = tk.StringVar(value=str(Path.cwd() / "mooink_prepared"))
         self.backup_dir = tk.StringVar(value=str(Path.cwd() / "mooink_backup"))
-        self.reader_size = tk.StringVar(value="13.3")
+        self._settings_path = device_settings_path()
+        self.device_size = tk.StringVar(value=load_device_size(self._settings_path))
+        self.prepared_folder_label = tk.StringVar()
         self.orientation = tk.StringVar(value="auto")
         self.fit = tk.StringVar(value="smart")
         self.transport = tk.StringVar(value="usb")
@@ -55,6 +94,7 @@ class MooinkSleepUI:
         self._transfer_kind = "備份並刪除"
         self._inputs: list[str] = []
         self._converted: list[Path] = []
+        self._converted_by_size: dict[str, list[Path]] = {"10.3": [], "13.3": []}
         self._device_names: list[str] = []
         self._sleep_identity = None  # Connection/settings used for displayed list.
         self._preview_path: Path | None = None
@@ -64,6 +104,9 @@ class MooinkSleepUI:
 
         self._style()
         self._build()
+        self._update_prepared_folder()
+        self.device_size.trace_add("write", self._device_size_changed)
+        self.output_dir.trace_add("write", lambda *_args: self._update_prepared_folder())
         self.wifi_share.trace_add("write", lambda *_args: self._invalidate_sleep())
         self.root.after(100, self._drain)
         self.root.after(350, self._backup_tick)
@@ -130,10 +173,7 @@ class MooinkSleepUI:
         config.pack(fill="x", pady=(0, 10))
         line = ttk.Frame(config)
         line.pack(fill="x")
-        ttk.Label(line, text="螢幕尺寸").pack(side="left")
-        ttk.Combobox(
-            line, state="readonly", width=8, textvariable=self.reader_size, values=("10.3", "13.3"),
-        ).pack(side="left", padx=(6, 16))
+        ttk.Label(line, text="輸出尺寸：10.3 與 13.3 吋（同時製作）").pack(side="left", padx=(0, 14))
         ttk.Label(line, text="方向").pack(side="left")
         ttk.Combobox(
             line, state="readonly", width=11, textvariable=self.orientation,
@@ -147,7 +187,7 @@ class MooinkSleepUI:
 
         pathrow = ttk.Frame(config)
         pathrow.pack(fill="x", pady=(10, 0))
-        ttk.Label(pathrow, text="輸出目錄").pack(side="left")
+        ttk.Label(pathrow, text="輸出根目錄").pack(side="left")
         ttk.Entry(pathrow, textvariable=self.output_dir).pack(side="left", fill="x", expand=True, padx=8)
         ttk.Button(pathrow, text="瀏覽", command=self._choose_output).pack(side="left")
 
@@ -167,20 +207,24 @@ class MooinkSleepUI:
         scroll.pack(side="left", fill="y")
 
         ttk.Button(
-            left, text="開始批次轉換", command=self._convert, style="Action.TButton",
+            left, text="同時製作 10.3 + 13.3 吋圖片", command=self._convert,
+            style="Action.TButton",
         ).pack(fill="x", pady=(0, 10))
 
         outputs = ttk.LabelFrame(left, text="  已轉換檔案（點選預覽）  ", style="Heading.TLabelframe", padding=10)
         outputs.pack(fill="both", expand=True)
-        self.output_tree = ttk.Treeview(outputs, columns=("name", "size"), show="headings", height=6)
+        self.output_tree = ttk.Treeview(
+            outputs, columns=("model", "name", "size"), show="headings", height=6)
+        self.output_tree.heading("model", text="適用尺寸")
         self.output_tree.heading("name", text="檔名")
         self.output_tree.heading("size", text="大小")
-        self.output_tree.column("name", width=370, stretch=True)
-        self.output_tree.column("size", width=80, stretch=False, anchor="e")
+        self.output_tree.column("model", width=90, stretch=False, anchor="center")
+        self.output_tree.column("name", width=310, stretch=True)
+        self.output_tree.column("size", width=75, stretch=False, anchor="e")
         self.output_tree.pack(fill="both", expand=True)
         self.output_tree.bind("<<TreeviewSelect>>", self._select_output)
         ttk.Label(
-            outputs, text="提醒：轉換不會自動上傳；請到「裝置 / sleep 管理」選擇圖片後上傳。",
+            outputs, text="輸出至 10.3／13.3 兩個子目錄；裝置管理會自動選擇相應的上傳資料夾。",
             style="Subtitle.TLabel",
         ).pack(anchor="w", pady=(5, 0))
 
@@ -196,6 +240,21 @@ class MooinkSleepUI:
                         command=self._invalidate_sleep).pack(side="left")
         ttk.Radiobutton(first, text="已掛載 Wi-Fi sleep 共享目錄", variable=self.transport, value="wifi",
                         command=self._invalidate_sleep).pack(side="left", padx=24)
+        size_row = ttk.Frame(conn)
+        size_row.pack(fill="x", pady=(10, 0))
+        ttk.Label(size_row, text="目前 mooInk 尺寸").pack(side="left")
+        ttk.Combobox(
+            size_row, textvariable=self.device_size, state="readonly",
+            width=9, values=("10.3", "13.3"),
+        ).pack(side="left", padx=(8, 16))
+        ttk.Label(
+            size_row, text="自動儲存設定；下次啟動直接沿用",
+            style="Subtitle.TLabel",
+        ).pack(side="left")
+        ttk.Label(
+            conn, textvariable=self.prepared_folder_label,
+            style="Subtitle.TLabel", wraplength=900,
+        ).pack(fill="x", pady=(5, 0))
         second = ttk.Frame(conn)
         second.pack(fill="x", pady=(10, 0))
         ttk.Label(second, text="USB 裝置").pack(side="left")
@@ -530,10 +589,24 @@ class MooinkSleepUI:
         finally:
             pythoncom.CoUninitialize()
 
+    def _update_prepared_folder(self):
+        folder = Path(self.output_dir.get().strip() or ".") / self.device_size.get()
+        self.prepared_folder_label.set("目前裝置上傳預設目錄：" + str(folder))
+
+    def _device_size_changed(self, *_args):
+        size = self.device_size.get()
+        self._update_prepared_folder()
+        try:
+            save_device_size(self._settings_path, size)
+            self._log("裝置尺寸已儲存：%s 吋" % size)
+        except (OSError, ValueError) as exc:
+            self._log("裝置尺寸設定儲存失敗：" + str(exc))
+            messagebox.showwarning("尺寸設定未儲存", str(exc))
+
     def _manager_options(self):
-        """Snapshot UI configuration on Tk's main thread before starting a worker."""
+        """Snapshot device-specific options on Tk's main thread."""
         return {
-            "size": self.reader_size.get(),
+            "size": self.device_size.get(),
             "orientation": self.orientation.get(),
             "fit": self.fit.get(),
             "output_dir": self.output_dir.get().strip(),
@@ -544,31 +617,54 @@ class MooinkSleepUI:
             messagebox.showinfo("缺少檔案", "請先加入至少一個圖片或文件。")
             return
         inputs = list(self._inputs)
-        options = self._manager_options()
-        if not options["output_dir"]:
-            messagebox.showwarning("缺少目錄", "請指定輸出目錄。")
+        settings = {
+            "orientation": self.orientation.get(),
+            "fit": self.fit.get(),
+            "output_dir": self.output_dir.get().strip(),
+        }
+        if not settings["output_dir"]:
+            messagebox.showwarning("缺少目錄", "請指定輸出根目錄。")
             return
 
         def work():
-            manager = SleepScreenManager(**options)
-            paths = manager.convert(inputs)
-            return ([str(p) for p in paths], list(manager.logs))
+            groups, logs = convert_both_sizes(inputs, **settings)
+            return ({size: [str(path) for path in group]
+                     for size, group in groups.items()}, logs)
 
         def done(result):
-            names, logs = result
+            groups, logs = result
             for line in logs:
                 self._log(line)
-            self._converted = [Path(p) for p in names]
+            self._converted_by_size = {
+                size: [Path(path) for path in groups.get(size, [])]
+                for size in ("10.3", "13.3")
+            }
+            self._converted = []
+            self._preview_path = None
+            self._preview_photo = None
+            self.preview_label.configure(image="", text="選擇檔案即可預覽")
             for item in self.output_tree.get_children():
                 self.output_tree.delete(item)
-            for index, path in enumerate(self._converted):
-                self.output_tree.insert("", "end", iid=str(index),
-                                        values=(path.name, "%0.1f KB" % (path.stat().st_size / 1024)))
-            self._log("轉換產生 %d 張圖片；尚未傳到裝置。" % len(names))
-            if names:
+            for size in ("10.3", "13.3"):
+                for path in self._converted_by_size[size]:
+                    index = len(self._converted)
+                    self._converted.append(path)
+                    self.output_tree.insert(
+                        "", "end", iid=str(index),
+                        values=(size + " 吋", path.name,
+                                "%0.1f KB" % (path.stat().st_size / 1024)),
+                    )
+            for size in ("10.3", "13.3"):
+                self._log("%s 吋：%d 張 → %s" % (
+                    size, len(self._converted_by_size[size]),
+                    Path(settings["output_dir"]) / size,
+                ))
+            self._log("兩種尺寸總計產生 %d 張；尚未傳到 mooInk。" %
+                      len(self._converted))
+            if self._converted:
                 self.output_tree.selection_set("0")
 
-        self._task("轉換圖片", work, done)
+        self._task("同時製作兩種尺寸圖片", work, done)
 
     def _select_output(self, _event=None):
         selected = self.output_tree.selection()
@@ -684,12 +780,32 @@ class MooinkSleepUI:
         if self._busy:
             messagebox.showinfo("操作進行中", "請先完成目前的裝置操作。")
             return
+        # Default to the prepared images matching the device setting, not
+        # the other reader's resolution.
+        target_dir = Path(self.output_dir.get().strip()) / self.device_size.get()
+        start_dir = target_dir if target_dir.is_dir() else Path(self.output_dir.get())
         paths = filedialog.askopenfilenames(
-            title="選擇要新增至 mooInk sleep 的 JPG/PNG",
-            initialdir=self.output_dir.get() if Path(self.output_dir.get()).is_dir() else None,
+            title="選擇 %s 吋 mooInk sleep 上傳圖片" % self.device_size.get(),
+            initialdir=str(start_dir) if start_dir.is_dir() else None,
             filetypes=[("JPG / PNG", "*.jpg *.jpeg *.png")],
         )
         if not paths:
+            return
+        # Reject prepared images from the OTHER model. Outside generated
+        # folders, manual custom JPGs remain permitted.
+        expected_size = self.device_size.get()
+        other = "13.3" if expected_size == "10.3" else "10.3"
+        wrong_size = [
+            Path(raw).name for raw in paths
+            if other in Path(raw).parts
+            and Path(self.output_dir.get()).resolve() in Path(raw).resolve().parents
+        ]
+        if wrong_size:
+            messagebox.showwarning(
+                "圖片尺寸不符",
+                "目前裝置設定為 %s 吋，但選取了 %s 吋輸出目錄內的檔案：\n%s" %
+                (expected_size, other, "\n".join(wrong_size[:10])),
+            )
             return
         try:
             expected = self._transport_snapshot()
