@@ -284,10 +284,12 @@ class MooinkLowLevel:
         backup_dir_shell = self._shell.Namespace(str(backup_dir))
         if backup_dir_shell is None:
             raise RuntimeError("Windows Shell 無法開啟備份資料夾")
+        if not 5 <= backup_timeout <= 300:
+            raise ValueError("單張 MTP 備份等待秒數必須介於 5 至 300")
         notify("copying", message="要求 Windows 複製 USB 圖片", copied=0,
                total=src_size, timeout=backup_timeout)
-        backup_dir_shell.CopyHere(item, 0)
         deadline = time.monotonic() + backup_timeout
+        backup_dir_shell.CopyHere(item, 0)
         stable = 0
         last_size = None
         current_size = 0
@@ -495,7 +497,7 @@ class SleepScreenManager:
 
     def manage(self, files=None, operation="list", backup_dir="mooink_backup",
                *, confirm=True, continue_on_error=False, on_result=None,
-               on_stage=None):
+               on_stage=None, backup_timeout=None):
         """Manage sleep files. Batch deletion can report every file separately.
 
         continue_on_error=True returns a list of records:
@@ -562,6 +564,8 @@ class SleepScreenManager:
                     options = {}
                     if on_stage is not None:
                         options["progress"] = emit
+                    if backup_timeout is not None:
+                        options["backup_timeout"] = float(backup_timeout)
                     detail = str(self.io.backup_and_delete(
                         name, Path(backup_dir), confirm_delete=confirm, **options))
                     if detail.startswith("deleted+verified;"):
