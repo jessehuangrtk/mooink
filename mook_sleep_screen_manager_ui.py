@@ -424,7 +424,7 @@ class MooinkSleepUI:
             "deleting": "送出刪除命令",
             "pending": "刪除待確認",
             "deleted": "已確認刪除",
-            "failed": "備份／刪除失敗，保留原檔並跳過",
+            "failed": "失敗／需檢查原檔與備份（本次不重試）",
             "skipped": "已跳過",
         }
         phase_label = labels.get(phase, phase)
