@@ -30,3 +30,26 @@ Do **not** substitute the remote-document/PDF viewer concept as the default: the
 - No confirmed remote wake or immediate sleep command in either USB MTP or Sony-compatible API.
 - It is unknown whether the first-generation mooInk's Wi-Fi service remains open while asleep.
 - No demonstrated high-frame-rate continuous mirroring.
+
+## Confirmed on user's first-generation device: 2026-11-21
+
+At the actual LAN IP `192.168.1.137`, the user's **awake** and **sleeping** probes reported:
+
+| Condition | TCP 8080 | TCP 8443 | HTTP GET /register/information on 8080 | HTTP GET /api_version on 8080 |
+|---|---|---|---|---|
+| Awake | open | open | 200 JSON | 200 JSON |
+| Sleeping | open | open | 200 JSON | 200 JSON |
+
+This verifies a reachable registration/metadata service while the **screen is asleep**, but **does not prove waking the panel**, availability of authenticated endpoints, or a remote standby command. In particular it is normal for an E Ink screen to stay unchanged while parts of the controller are serving network requests.
+
+The test used an earlier example IP before the actual LAN IP was found; any former timeouts at `192.168.1.150` are non-evidence about device functionality.
+
+### Next targeted validation
+
+- While sleeping, run a **GET-only** HTTPS request to `https://192.168.1.137:8443/system/status/battery` and record only the HTTP status (likely authentication required). This tests authenticated-API routing, **not wake**.
+- If 401/403, perform standard pairing with the owner's consent using `dpt-rp1-py`, then test whether a documented *open document* operation `PUT /viewer/controls/open2` produces a visible change during sleep. This call changes the displayed document, so it should not be treated as read-only and should be carried out only after backing up data and preparing a non-sensitive test PDF. It is **not a documented wake/sleep toggle**.
+- Sony documentation supports configuring auto-sleep, but current code `/system/configs/timeout_to_standby` only changes the delay; it does not remotely trigger immediate standby. No direct wake API was found in the researched public tool.
+
+Sony sources: https://helpguide.sony.net/dpt/rp1/v1/en/contents/TP0001178278.html and https://helpguide.sony.net/dpt/rp1/v1/en/contents/TP0001178333.html
+
+Open-source client: https://github.com/janten/dpt-rp1-py
