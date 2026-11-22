@@ -30,7 +30,13 @@ class FakeSerial:
         elif cmd == "HELLO":
             response = "OK HELLO MOOINK_PICO2W_BT/1"
         elif cmd == "STATUS":
-            response = "OK STATUS ready=1 paired=1 connected=1 pairing=0 connecting=0 peer=AA:BB:CC:DD:EE:FF"
+            response = "OK STATUS ready=1 paired=1 connected=1 pairing=0 connecting=0 peer=AA:BB:CC:DD:EE:FF raw_echo=1"
+        elif cmd == "MODE KEYBOARD ACK":
+            response = "OK MODE KEYBOARD ACK"
+        elif data == b" ":
+            response = "OK RAW SENT ASCII=0x20 HID=0x2C"
+        elif data == b"\x1d":
+            response = "OK MODE COMMAND"
         elif cmd.startswith("KEY "):
             response = "EVENT diagnostic\r\nOK KEY SENT"
         elif cmd.startswith("KEYH "):
@@ -79,6 +85,12 @@ class KeyboardTests(unittest.TestCase):
                 return super().write(data)
         with PicoKeyboard("COM6", serial_factory=Old) as board:
             self.assertEqual(board.wake("space"), "OK KEY SENT")
+
+    def test_raw_space_uses_same_ascii_as_terminal(self):
+        with PicoKeyboard("COM6", serial_factory=FakeSerial) as board:
+            self.assertEqual(board.raw_key(" "), "OK RAW SENT ASCII=0x20 HID=0x2C")
+            self.assertEqual(board.ser.commands[-3:], ["MODE KEYBOARD ACK","",""])
+            self.assertNotIn("KEY 0 44",board.ser.commands)
 
     def test_long_space_diagnostic(self):
         received = []

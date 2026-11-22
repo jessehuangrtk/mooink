@@ -227,6 +227,51 @@ class PicoKeyboard:
             time.sleep(wait)
         return response
 
+    def raw_key(self, value):
+        """Send one ASCII character through the same path as Tera Term.
+        Machine ACK mode suppresses echo and reports the completed HID tap.
+        """
+        if len(value) != 1 or not (32 <= ord(value) <= 126 or value in "\r\n\t\b"):
+            raise ValueError("raw_key 僅支援單一 ASCII 字元")
+        self.ensure_connected()
+        status = self.status()
+        if status.get("raw_echo") != "1":
+            raise RuntimeError("請燒錄支援直接 ASCII 鍵盤模式的新版 UF2")
+        if self.command("MODE KEYBOARD ACK") != "OK MODE KEYBOARD ACK":
+            self.close()
+            raise RuntimeError("Pico 未進入 ACK 模式")
+        try:
+            self.ser.write(value.encode("ascii"))
+            expected = "OK RAW SENT ASCII=0x%02X " % ord(value)
+            deadline = time.monotonic() + 8
+            while True:
+                line = self._line(deadline)
+                if line is None:
+                    raise TimeoutError("Pico ASCII 按鍵逾時")
+                if line.startswith(expected):
+                    break
+                if line.startswith("ERR "):
+                    raise RuntimeError(line)
+                if line:
+                    self.event(line)
+            result = line
+            # Exit raw mode without sending printable command bytes into HID.
+            self.ser.write(b"\x1d")
+            deadline = time.monotonic() + 3
+            while True:
+                line = self._line(deadline)
+                if line is None:
+                    raise TimeoutError("Pico 無法切回 COMMAND")
+                if line == "OK MODE COMMAND":
+                    break
+                if line:
+                    self.event(line)
+            # Keep this API in COMMAND for subsequent commands.
+            return result
+        except BaseException:
+            self.close()
+            raise
+
     def type_text(self, value):
         codes = text_codes(value)  # validate ALL before sending any
         for mod, usage in codes:

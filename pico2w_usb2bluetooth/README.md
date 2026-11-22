@@ -97,23 +97,13 @@ python pico2w_usb2bluetooth.py --port COM6 wake --key space --hold-ms 1000
 
 新版改用獨立 ASCII 十進位解析器，不再依賴 sscanf。重新編譯並燒錄 UF2 後，STATUS 應出現 `key_parser=2`；HELLO 保持相容。先在清醒的 mooInk 搜尋欄測試 `key a`，再測試休眠 Space。無效 KEY 參數會回傳 INVALID_USAGE_OR_HOLD，而非 UNKNOWN_COMMAND。
 
-## Tera Term 即時鍵盤模式（僅 USB CDC）
 
-先關閉 Watch Tool/Python GUI，避免 COM 埠占用。Tera Term 選 Serial COM6，115200、8N1、Flow control None，Terminal Transmit CR（CRLF 亦可），Local echo On 可看到所輸入的指令。開啟後輸入 STATUS、必要時 CONNECT、待 connected=1 再輸入 MODE KEYBOARD（每條指令按 Enter）。
+## Tera Term 直接鍵盤模式（USB CDC）
 
-進入 KEYBOARD 後，ASCII 英數、標點、Space、Enter、Tab、Backspace 逐字直接送 HID，不需 Enter；按下 Ctrl+]（0x1D）返回 COMMAND。F1～F12/方向鍵 escape sequence 暫不支援，請回 COMMAND 用 KEY/KEYH；非 ASCII/中文不轉送。每鍵回顯 ASCII/HID/modifier、DOWN/UP、OK RAW SENT 或明確錯誤。佇列最多 32 個待送按鍵，滿載拒絕新輸入；斷線清除佇列，不重送。按 Ctrl+] 會丟棄待送佇列，已開始的按鍵仍完成放開。Python 開啟 COM 時先送 Ctrl+] 切回 COMMAND，新舊韌體相容。請勿同時開啟 Tera Term 和 Watch Tool。
+新版上電預設 KEYBOARD。不需輸入指令，Tera Term 直接打字便原樣顯示並送出對應的 Bluetooth HID 按鍵。英數、ASCII 標點、Space、Enter、Tab、Backspace 支援 US layout；Enter 顯示 CRLF，Backspace 顯示刪除。無每鍵格式或成功訊息。若未連線、佇列滿、無法傳送或不支援的字元才顯示錯誤。中文及功能鍵 escape sequence 不轉送。最多 32 鍵等待。
 
-範例（實際回報不代表目標裝置已顯示）：
+設定 Serial COM6 / 115200 / 8N1 / Flow control None / Transmit CR / **Local echo OFF**。不要同時開啟 Watch Tool。
 
-~~~text
-MODE KEYBOARD
-OK MODE KEYBOARD
-KEY SPACE ASCII=0x20 HID=0x2C MOD=0x00
-EVENT KEY DOWN mod=0 usage=44 hold_ms=60
-EVENT KEY UP
-OK RAW SENT ASCII=0x20 HID=0x2C
-~~~
+按 Ctrl+] 回到 COMMAND，輸入 STATUS 或 CONNECT，每條按 Enter。待 connected=1 後輸入 MODE KEYBOARD 再直接打字。STATUS 應顯示 cdc_rx=4、raw_echo=1。Python 連接時會自動以 Ctrl+] 進入 COMMAND；若使用過 Python 後仍在 COMMAND，可輸入 MODE KEYBOARD 或重新插拔 Pico。ECHO ON/OFF 只控制 COMMAND 回顯。KEY/KEYH 仍可進階診斷。
 
-### CDC 輸入診斷（cdc_rx=3）
-
-新版直接以 Pico SDK getchar_timeout_us(0) 每 20 ms 非阻塞讀取最多 64 個 CDC byte，避免把讀取逾時當作輸入。COMMAND 模式預設逐字輸出 EVENT RX ASCII=0x..，大小寫皆可，支援 Backspace、Ctrl+U 清除輸入、CR/LF/CRLF；無效字元會明確印出十六進位，該行不執行。PIN 數字遮蔽。HELLO 自動關閉逐字診斷以相容 Python，ECHO ON/OFF 手動開關，Ctrl+] 返回 COMMAND 並重新打開診斷。Tera Term 將 Local echo 關閉，英文半形鍵入 status 再 Enter，STATUS 中應包含 cdc_rx=3、rx_bytes；此時即使尚未配對亦能看見接收診斷。
+Watch Tool 的喚醒改用同一 ASCII 路徑，直接送出一個空白字元（0x20），使用 MODE KEYBOARD ACK 取得內部傳送結果，不在一般 Tera Term 模式顯示格式。ACK 僅代表 Pico 已將按鍵交給 BTstack，不代表實際喚醒。未燒錄新版則明確報錯，不退回 F12。

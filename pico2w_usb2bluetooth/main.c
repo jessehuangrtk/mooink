@@ -44,7 +44,7 @@ static bool overflow, invalid_line;
 static bool console_echo=true;
 static uint32_t rx_bytes;
 #define RAW_QUEUE_SIZE 32
-static bool keyboard_mode, key_raw, raw_cr;
+static bool keyboard_mode=true, key_raw, raw_cr, raw_ack, key_raw_ack;
 static terminal_key_t raw_queue[RAW_QUEUE_SIZE];
 static unsigned raw_head, raw_count;
 static uint8_t raw_ascii, escape_state;
@@ -75,7 +75,7 @@ static void key_fail(const char *why){
   clear_raw_queue();
 }
 static void start_key(uint8_t mod,uint8_t usage,unsigned hold,bool extended,bool raw,uint8_t ascii){
-  key_hold_ms=hold;key_extended=extended;key_raw=raw;raw_ascii=ascii;
+  key_hold_ms=hold;key_extended=extended;key_raw=raw;raw_ascii=ascii;key_raw_ack=raw&&raw_ack;
   key_mod=mod;key_usage=usage;key_end=ms()+hold+5000;key_state=DOWN;
   hid_device_request_can_send_now_event(cid);
 }
@@ -105,11 +105,13 @@ static void raw_input(uint8_t ch){
   if(!terminal_key(ch,&k)){
     printf("ERR RAW UNSUPPORTED ASCII=0x%02X\n",(unsigned)ch);return;
   }
-  if(ch==' ')printf("KEY SPACE ASCII=0x20 HID=0x%02X MOD=0x%02X\n",k.usage,k.mod);
-  else if(k.usage==40)printf("KEY ENTER ASCII=0x%02X HID=0x%02X MOD=0x%02X\n",ch,k.usage,k.mod);
-  else if(k.usage==42)printf("KEY BACKSPACE ASCII=0x%02X HID=0x%02X MOD=0x%02X\n",ch,k.usage,k.mod);
-  else if(k.usage==43)printf("KEY TAB ASCII=0x%02X HID=0x%02X MOD=0x%02X\n",ch,k.usage,k.mod);
-  else printf("KEY '%c' ASCII=0x%02X HID=0x%02X MOD=0x%02X\n",ch,ch,k.usage,k.mod);
+  // Echo the actual typed character, not its numeric HID representation.
+  // ACK mode uses the same translation, but is framed for a machine client.
+  if(!raw_ack){
+    if(k.usage==40){putchar_raw('\r');putchar_raw('\n');}
+    else if(k.usage==42){putchar_raw('\b');putchar_raw(' ');putchar_raw('\b');}
+    else putchar_raw(ch);
+  }
   if(!paired||!connected){puts("ERR RAW NOT_CONNECTED");return;}
   if(raw_count==RAW_QUEUE_SIZE){puts("ERR RAW QUEUE_FULL");return;}
   raw_queue[(raw_head+raw_count)%RAW_QUEUE_SIZE]=k;++raw_count;
@@ -126,7 +128,7 @@ static void command(char *s){
   if(!strcmp(s,"ECHO ON")){console_echo=true;puts("OK ECHO ON");return;}
   if(!strcmp(s,"ECHO OFF")){console_echo=false;puts("OK ECHO OFF");return;}
   if(!strcmp(s,"STATUS")){
-    printf("OK STATUS ready=%u paired=%u connected=%u pairing=%u connecting=%u peer=%s key_parser=2 mode=%s cdc_rx=3 rx_bytes=%lu\n",
+    printf("OK STATUS ready=%u paired=%u connected=%u pairing=%u connecting=%u peer=%s key_parser=2 mode=%s cdc_rx=4 rx_bytes=%lu raw_echo=1\n",
         ready,paired,connected,pairing,connecting,paired?bd_addr_to_str(peer):"-",keyboard_mode?"KEYBOARD":"COMMAND",(unsigned long)rx_bytes);return;
   }
   if(!ready){puts("ERR NOT_READY");return;}
@@ -134,12 +136,12 @@ static void command(char *s){
     puts("OK HELP STATUS CONNECT MODE KEYBOARD KEY KEYH PAIR CANCEL DISCONNECT FORGET ECHO ON/OFF");
     puts("EVENT HELP KEYBOARD exit=Ctrl+] (ASCII 0x1D)");return;
   }
-  if(!strcmp(s,"MODE KEYBOARD")){
-    if(!connected||!paired){puts("ERR MODE NOT_CONNECTED");return;}
+  if(!strcmp(s,"MODE KEYBOARD")||!strcmp(s,"MODE KEYBOARD ACK")){
+    bool ack=!strcmp(s,"MODE KEYBOARD ACK");
+    if(ack&&(!connected||!paired)){puts("ERR MODE NOT_CONNECTED");return;}
     if(key_state!=IDLE){puts("ERR MODE BUSY");return;}
-    clear_raw_queue();keyboard_mode=true;raw_cr=false;escape_state=0;
-    puts("OK MODE KEYBOARD");
-    puts("EVENT RAW Type ASCII directly; Ctrl+] returns to COMMAND");return;
+    clear_raw_queue();keyboard_mode=true;raw_ack=ack;raw_cr=false;escape_state=0;
+    puts(ack?"OK MODE KEYBOARD ACK":"OK MODE KEYBOARD");return;
   }
   if(!strcmp(s,"MODE COMMAND")){
     puts("OK MODE COMMAND");return;
@@ -203,12 +205,13 @@ static void serial_char(char c){
   ++rx_bytes;
   // Ctrl+] is reserved in either mode, never sent over Bluetooth.
   if(ch==0x1d){
-    keyboard_mode=false;escape_state=0;raw_cr=false;
+    keyboard_mode=false;raw_ack=false;escape_state=0;raw_cr=false;
     clear_raw_queue();clear_line();console_echo=true;
     puts("OK MODE COMMAND");return;
   }
   if(keyboard_mode){raw_input(ch);return;}
   if(ch=='\r'||ch=='\n'){
+    if(console_echo&&line_len){putchar_raw('\r');putchar_raw('\n');}
     if(overflow)puts("ERR LINE_TOO_LONG (max=99)");
     else if(invalid_line)puts("ERR INVALID_LINE");
     else if(line_len){
@@ -223,7 +226,7 @@ static void serial_char(char c){
   if(ch==0x15){clear_line();puts("EVENT RX LINE_CLEARED");return;}
   if(ch==8||ch==127){
     if(!overflow&&!invalid_line&&line_len)--line_len;
-    if(console_echo)puts("EVENT RX BACKSPACE");
+    if(console_echo){putchar_raw('\b');putchar_raw(' ');putchar_raw('\b');}
     return;
   }
   if(ch<32||ch>126){
@@ -235,8 +238,7 @@ static void serial_char(char c){
   if(line_len>=sizeof(line)-1){overflow=true;return;}
   // ASCII command names are case-insensitive. No PIN digits in diagnostics.
   if(console_echo){
-    if(pin_prefix())puts("EVENT RX [MASKED]");
-    else printf("EVENT RX ASCII=0x%02X '%c'\n",(unsigned)ch,c);
+    putchar_raw(pin_prefix()?'*':ch);
   }
   line[line_len++]=(ch>='a'&&ch<='z')?(char)(ch-'a'+'A'):(char)ch;
 }
@@ -310,10 +312,10 @@ static void packet(uint8_t type,uint16_t channel,uint8_t *p,uint16_t size){
       if(!connected||hid_subevent_can_send_now_get_hid_cid(p)!=cid)return;
       if(key_state==DOWN){
         report(key_mod,key_usage);key_state=HOLD;release_at=ms()+key_hold_ms;
-        if(key_extended||key_raw)printf("EVENT KEY DOWN mod=%u usage=%u hold_ms=%u\n",key_mod,key_usage,key_hold_ms);
+        if(key_extended)printf("EVENT KEY DOWN mod=%u usage=%u hold_ms=%u\n",key_mod,key_usage,key_hold_ms);
       }else if(key_state==UP){
         report(0,0);key_state=IDLE;
-        if(key_raw){puts("EVENT KEY UP");printf("OK RAW SENT ASCII=0x%02X HID=0x%02X\n",raw_ascii,key_usage);}
+        if(key_raw){if(key_raw_ack)printf("OK RAW SENT ASCII=0x%02X HID=0x%02X\n",raw_ascii,key_usage);}
         else if(key_extended){puts("EVENT KEY UP");puts("OK KEYH SENT");}
         else puts("OK KEY SENT");
       }

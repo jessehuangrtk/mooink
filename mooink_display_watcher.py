@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Windows watcher: DOCX -> grayscale PNG -> USB MTP sleep -> optional Pico F12.
+"""Windows watcher: DOCX -> grayscale PNG -> USB MTP sleep -> optional Pico Space.
 Only the reserved image for the selected size can be replaced.
 """
 from __future__ import annotations
@@ -187,14 +187,14 @@ def usb_list():
 
 def pico_wake(port, log):
     if not port:
-        return "未設定 Pico，略過 F12"
+        return "未設定 Pico，略過 Space"
     try:
         from pico2w_usb2bluetooth import PicoKeyboard, ports
         if not any(p.device.casefold() == port.casefold() for p in ports()):
-            return "找不到 " + port + "，略過 F12"
+            return "找不到 " + port + "，略過 Space"
         with PicoKeyboard(port, event=log) as kb:
-            kb.wake(key="f12", wait=0)
-        return "F12 已送出；電子紙是否喚醒尚待觀察"
+            kb.raw_key(" ")
+        return "Space 已送出；電子紙是否喚醒尚待觀察"
     except Exception as exc:
         return "Pico 喚醒略過：" + str(exc)
 
@@ -268,7 +268,7 @@ def main():
     events = queue.Queue()
     stop, trigger = threading.Event(), threading.Event()
     settings_lock = threading.Lock()
-    operation_lock = threading.Lock()  # serialize USB and manual F12
+    operation_lock = threading.Lock()  # serialize USB and manual Space
     force_pending = False
     status_text = tk.StringVar(value="等待首次檢查")
     processor = Processor()
@@ -325,7 +325,7 @@ def main():
     enable_usb = tk.BooleanVar(value=settings.enable_usb)
     ttk.Checkbutton(frame,text="啟用 USB 自動更新 sleep 圖片",
                     variable=enable_usb).grid(row=4,column=0,columnspan=3,sticky="w",pady=5)
-    ttk.Label(frame,text="依尺寸產生 mooink_display_10 / 13 的 PNG。\nUSB MTP 備份舊同名 PNG → 上傳 → SHA-256 回讀驗證 → Pico F12（選用）。\n只接一台 mooInk，並將同名 PNG 設為休眠圖。",wraplength=530).grid(row=6,column=0,columnspan=3,sticky="w",pady=8)
+    ttk.Label(frame,text="依尺寸產生 mooink_display_10 / 13 的 PNG。\nUSB MTP 備份舊同名 PNG → 上傳 → SHA-256 回讀驗證 → Pico Space（選用）。\n只接一台 mooInk，並將同名 PNG 設為休眠圖。",wraplength=530).grid(row=6,column=0,columnspan=3,sticky="w",pady=8)
     ttk.Label(frame,textvariable=status_text,wraplength=550).grid(row=7,column=0,columnspan=3,sticky="w",pady=5)
     def save():
         nonlocal settings, force_pending
@@ -365,7 +365,7 @@ def main():
             if not re.fullmatch(r"COM[1-9][0-9]*", port, re.I):
                 messagebox.showerror("COM 錯誤","請輸入 COM6 等有效 COM 埠",parent=root)
                 return
-            if not messagebox.askyesno("測試 F12","將送出 F12 至 Pico 已配對的閱讀器，請確認目標裝置。",parent=root):
+            if not messagebox.askyesno("測試 Space","將送出 Space 至 Pico 已配對的閱讀器，請確認目標裝置。",parent=root):
                 return
         manual_busy = True
         for button in action_buttons:
@@ -379,7 +379,7 @@ def main():
             except Exception as exc:
                 events.put(("manual_result",(action,None,str(exc))))
         threading.Thread(target=run,daemon=True).start()
-    for label, action in (("測試 USB／查詢 sleep","list"),("測試 F12","wake")):
+    for label, action in (("測試 USB／查詢 sleep","list"),("測試 Space","wake")):
         button = ttk.Button(buttons,text=label,command=lambda a=action: manual_job(a))
         button.pack(side="left",padx=3)
         action_buttons.append(button)
