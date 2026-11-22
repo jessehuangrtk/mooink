@@ -1,0 +1,6 @@
+build/
+.deps/
+__pycache__/
+*.pyc
+config.local.json
+firmware/config.local.h

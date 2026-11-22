@@ -1,0 +1,25 @@
+{
+  "wifi": {
+    "ssid": "YOUR_WIFI",
+    "password": ""
+  },
+  "smb": {
+    "server": "192.168.1.100",
+    "share": "mooink",
+    "username": "mooink_reader",
+    "password": "",
+    "file": "mooink_display.png",
+    "require_signing": true
+  },
+  "poll_seconds": 60,
+  "display_size": "10.3",
+  "usb": {
+    "vid": "1F85",
+    "pid": "4E16",
+    "sleep_filename": "mooink_display.png"
+  },
+  "bluetooth": {
+    "key": "space",
+    "peer": ""
+  }
+}

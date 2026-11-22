@@ -1,0 +1,166 @@
+/* Stage 1: one native USB host, read-only MTP probe. No Wi-Fi/BT yet. */
+#include <stdio.h>
+#include <string.h>
+#include "pico/stdlib.h"
+#include "tusb.h"
+#include "host/usbh_pvt.h"
+#include "mtp_codec.h"
+
+#define LIMIT 16384
+static uint8_t addr, itf, ep_in, ep_out;
+static bool configured, mounted, failed;
+static uint32_t tid, deadline;
+static uint16_t operation;
+static enum {IDLE, TX, RX_DATA, RX_RESPONSE} state;
+static enum {PROBE_INFO, PROBE_SESSION, PROBE_STORES, PROBE_ROOT, PROBE_OBJECT,
+             PROBE_CHILDREN, PROBE_CHILD, PROBE_CLOSE, PROBE_DONE} step;
+static uint8_t tx[32] __attribute__((aligned(4)));
+static uint8_t rx[512] __attribute__((aligned(4)));
+static uint8_t payload[LIMIT];
+static size_t used, expected, tx_size;
+static uint32_t stores[16], handles[512], sleep_handle, sleep_store;
+static size_t store_n, store_i, handle_n, handle_i;
+static unsigned sleep_matches;
+static bool data_seen;
+static uint32_t now_ms(void){return to_ms_since_boot(get_absolute_time());}
+static void fail(const char *message){printf("ERROR %s; unplug/replug mooInk to retry\n",message);failed=true;state=IDLE;}
+static bool data_operation(void){return operation!=MTP_OPEN&&operation!=MTP_CLOSE;}
+static bool queue_in(void){
+    if(!usbh_edpt_xfer(addr,ep_in,rx,sizeof(rx))){fail("bulk IN submit");return false;}
+    deadline=now_ms()+5000;return true;
+}
+static void start(uint16_t op,const uint32_t *params,size_t n){
+    operation=op;used=0;expected=0;data_seen=false;
+    uint32_t id=op==MTP_DEVICE_INFO||op==MTP_OPEN?0:++tid;
+    tx_size=mtp_command(tx,sizeof(tx),op,id,params,n);
+    if(!tx_size){fail("invalid command");return;}
+    state=TX;deadline=now_ms()+5000;
+    if(!usbh_edpt_xfer(addr,ep_out,tx,(uint16_t)tx_size))fail("bulk OUT submit");
+}
+static void root(void){
+    uint32_t args[]={stores[store_i],0,0xffffffffu};
+    step=PROBE_ROOT;start(MTP_HANDLES,args,3);
+}
+static void next_root(void){
+    if(handle_i<handle_n){step=PROBE_OBJECT;start(MTP_OBJECT_INFO,&handles[handle_i],1);return;}
+    if(++store_i<store_n){root();return;}
+    if(sleep_matches!=1){printf("sleep folder matches=%u\n",sleep_matches);step=PROBE_CLOSE;start(MTP_CLOSE,NULL,0);return;}
+    printf("sleep folder handle=%08lx storage=%08lx\n",(unsigned long)sleep_handle,(unsigned long)sleep_store);
+    uint32_t args[]={sleep_store,0,sleep_handle};
+    step=PROBE_CHILDREN;start(MTP_HANDLES,args,3);
+}
+static void completed(void){
+    uint32_t one=1;
+    uint16_t format;uint32_t parent;char name[256];
+    switch(step){
+    case PROBE_INFO:
+        printf("GetDeviceInfo OK, %u bytes\n",(unsigned)used);
+        step=PROBE_SESSION;start(MTP_OPEN,&one,1);break;
+    case PROBE_SESSION:
+        puts("OpenSession OK");step=PROBE_STORES;start(MTP_STORAGE_IDS,NULL,0);break;
+    case PROBE_STORES:
+        if(!mtp_array32(payload,used,stores,16,&store_n)||!store_n){fail("storage list invalid or empty");return;}
+        printf("storage count=%u\n",(unsigned)store_n);store_i=0;root();break;
+    case PROBE_ROOT:
+        if(!mtp_array32(payload,used,handles,512,&handle_n)){fail("root handle list exceeds limit or malformed");return;}
+        handle_i=0;next_root();break;
+    case PROBE_OBJECT:
+        if(!mtp_object_info(payload,used,&format,&parent,name,sizeof(name))){fail("malformed ObjectInfo");return;}
+        printf("ROOT %08lx %04x %s\n",(unsigned long)handles[handle_i],format,name);
+        if(format==0x3001&&!strcmp(name,"sleep")){++sleep_matches;sleep_handle=handles[handle_i];sleep_store=stores[store_i];}
+        ++handle_i;next_root();break;
+    case PROBE_CHILDREN:
+        if(!mtp_array32(payload,used,handles,512,&handle_n)){fail("sleep handle list exceeds limit or malformed");return;}
+        printf("sleep objects=%u\n",(unsigned)handle_n);handle_i=0;
+        if(handle_n){step=PROBE_CHILD;start(MTP_OBJECT_INFO,&handles[0],1);}
+        else{step=PROBE_CLOSE;start(MTP_CLOSE,NULL,0);}break;
+    case PROBE_CHILD:
+        if(!mtp_object_info(payload,used,&format,&parent,name,sizeof(name))){fail("malformed sleep ObjectInfo");return;}
+        printf("SLEEP %08lx %04x %s\n",(unsigned long)handles[handle_i],format,name);
+        if(++handle_i<handle_n)start(MTP_OBJECT_INFO,&handles[handle_i],1);
+        else{step=PROBE_CLOSE;start(MTP_CLOSE,NULL,0);}break;
+    case PROBE_CLOSE:
+        step=PROBE_DONE;puts(sleep_matches==1?"READ-ONLY PROBE COMPLETE":"READ-ONLY PROBE INCOMPLETE: sleep not unique");break;
+    default:fail("unexpected step");break;
+    }
+}
+static bool init(void){return true;}
+static bool deinit(void){return true;}
+static bool open_driver(uint8_t rhport,uint8_t d,tusb_desc_interface_t const * desc,uint16_t len){
+    (void)rhport;
+    if(addr||desc->bAlternateSetting||desc->bInterfaceClass!=6||desc->bInterfaceSubClass!=1||desc->bInterfaceProtocol!=1)return false;
+    const uint8_t *p=(const uint8_t*)desc;
+    if(len<sizeof(*desc)||p[0]<sizeof(*desc)||p[0]>len)return false;
+    const tusb_desc_endpoint_t *in=NULL,*out=NULL;
+    size_t offset=p[0];
+    while(offset+2<=len){
+        const uint8_t *q=p+offset;
+        if(q[0]<2||offset+q[0]>len)return false;
+        if(q[1]==TUSB_DESC_INTERFACE)break;
+        if(q[1]==TUSB_DESC_ENDPOINT&&q[0]>=7&&(q[3]&3)==2){
+            if(q[2]&0x80){if(in)return false;in=(const tusb_desc_endpoint_t*)q;}
+            else {if(out)return false;out=(const tusb_desc_endpoint_t*)q;}
+        }
+        offset+=q[0];
+    }
+    if(!in||!out)return false;
+    if(!tuh_edpt_open(d,in)||!tuh_edpt_open(d,out))return false;
+    addr=d;itf=desc->bInterfaceNumber;ep_in=in->bEndpointAddress;ep_out=out->bEndpointAddress;
+    printf("MTP interface=%u IN=%02x OUT=%02x\n",itf,ep_in,ep_out);return true;
+}
+static bool set_config(uint8_t d,uint8_t i){
+    if(d!=addr||i!=itf)return false;
+    configured=true;usbh_driver_set_config_complete(d,i);return true;
+}
+static void close_driver(uint8_t d){
+    if(d==addr){addr=0;configured=mounted=failed=false;state=IDLE;puts("MTP detached");}
+}
+static bool xfer(uint8_t d,uint8_t ep,xfer_result_t result,uint32_t n){
+    if(d!=addr||failed)return true;
+    if(result!=XFER_RESULT_SUCCESS){fail("USB transfer failed");return true;}
+    if(state==TX&&ep==ep_out&&n==tx_size){state=RX_DATA;queue_in();return true;}
+    if((state!=RX_DATA&&state!=RX_RESPONSE)||ep!=ep_in||n>sizeof(rx)){fail("unexpected transfer");return true;}
+    if(!n){queue_in();return true;}
+    /* A data container begins at a USB transfer boundary; payload may span
+       multiple transfers. Responses have their own short container. */
+    if(state==RX_DATA&&expected){
+        if(n>expected-used){fail("data container overflow");return true;}
+        memcpy(payload+used,rx,n);used+=n;
+        if(used==expected){expected=0;state=RX_RESPONSE;}
+        queue_in();return true;
+    }
+    mtp_header h;
+    if(!mtp_decode_header(rx,n,&h)||h.transaction!=(operation==MTP_DEVICE_INFO||operation==MTP_OPEN?0:tid)){fail("invalid MTP header or transaction");return true;}
+    if(h.type==MTP_DATA&&state==RX_DATA&&!data_seen&&data_operation()&&h.code==operation){
+        if(h.length-12>LIMIT||n>h.length){fail("data exceeds probe buffer");return true;}
+        data_seen=true;used=n-12;expected=h.length-12;memcpy(payload,rx+12,used);
+        if(used==expected){expected=0;state=RX_RESPONSE;}
+        queue_in();return true;
+    }
+    if(h.type==MTP_RESPONSE&&h.length==n){
+        if(h.code!=MTP_OK){printf("MTP op=%04x response=%04x\n",operation,h.code);fail("MTP rejected operation");return true;}
+        if(data_operation()&&!data_seen){fail("missing data");return true;}
+        state=IDLE;completed();return true;
+    }
+    fail("unexpected MTP container");return true;
+}
+static const usbh_class_driver_t driver={.name="MTP probe",.init=init,.deinit=deinit,.open=open_driver,.set_config=set_config,.xfer_cb=xfer,.close=close_driver};
+usbh_class_driver_t const *usbh_app_driver_get_cb(uint8_t *count){*count=1;return &driver;}
+void tuh_mount_cb(uint8_t d){
+    uint16_t v=0,p=0;tuh_vid_pid_get(d,&v,&p);
+    printf("USB mounted VID=%04x PID=%04x\n",v,p);
+    if(d!=addr||!configured){puts("No supported MTP interface");return;}
+    if(v!=0x1f85||p!=0x4e16){fail("USB identity differs from tested mooInk");return;}
+    mounted=true;tid=0;sleep_matches=0;step=PROBE_INFO;start(MTP_DEVICE_INFO,NULL,0);
+}
+void tuh_umount_cb(uint8_t d){(void)d;puts("USB unmounted");}
+int main(void){
+    stdio_init_all();sleep_ms(500);
+    puts("Pico_wifi_display stage 1: native USB MTP read-only");
+    if(!tuh_init(0)){puts("USB host init failed");return 1;}
+    while(true){
+        tuh_task_ext(0,false);
+        if(mounted&&!failed&&state!=IDLE&&(int32_t)(now_ms()-deadline)>=0)fail("MTP transfer timeout");
+        sleep_ms(1);
+    }
+}
