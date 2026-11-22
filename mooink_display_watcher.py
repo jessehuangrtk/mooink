@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Windows tray watcher: size-specific DOCX -> PNG -> verified Wi-Fi sleep share -> optional Pico F12.
-The native Sony API does not have a verified PNG sleep-folder upload route.
-Configure an actual UNC sleep share on the target reader before enabling transfer.
+"""Windows tray watcher: size-specific DOCX -> PNG, native Wi-Fi API pairing and diagnostics.
+Native Wi-Fi writing to the reader's sleep directory is not yet verified.
+Automatic wake must wait for a verified image transfer; manual F12 test is available.
 """
 from __future__ import annotations
 import hashlib
@@ -10,7 +10,7 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 import queue
 import re
 import shutil
@@ -71,7 +71,6 @@ class Settings:
     interval_sec: int = 60
     mooink_ip: str = "192.168.1.140"
     pico_port: str = "COM6"  # blank disables Pico
-    wifi_share: str = ""  # must be a real remotely exported sleep directory
 
     def validate(self):
         if self.size not in RESOLUTIONS:
@@ -88,10 +87,6 @@ class Settings:
             raise ValueError("template 是原始範本資料夾，不能作為監控目錄")
         if self.pico_port and not re.fullmatch(r"COM[1-9][0-9]*", self.pico_port, re.I):
             raise ValueError("Pico COM 埠格式為 COM6 等，空白表示停用")
-        if self.wifi_share:
-            share = PureWindowsPath(self.wifi_share)
-            if not share.drive.startswith("\\\\") or share.drive.split("\\")[2] != str(ip) or share.name.lower() != "sleep" or ".." in share.parts:
-                raise ValueError("Wi-Fi 共享路徑必須是同一 IP 的 UNC sleep 目錄，例如 \\\\192.168.1.140\\實際共享名稱\\sleep")
         return self
 
     def paths(self):
@@ -99,9 +94,9 @@ class Settings:
         root = Path(self.watch_dir)
         return root / (stem + ".docx"), root / (stem + ".png")
 
-    def delivery_key(self):
-        return json.dumps([str(Path(self.watch_dir).resolve()), self.size,
-                           self.mooink_ip, self.wifi_share], ensure_ascii=False)
+    def render_key(self):
+        return json.dumps(["render-v2", str(Path(self.watch_dir).resolve()), self.size],
+                          ensure_ascii=False)
 
 def read_json(path, default):
     try:
@@ -173,29 +168,6 @@ def render_png(source, output, size):
         if com is not None:
             com.CoUninitialize()
 
-def wifi_upload(settings, source, expected_hash):
-    """Transfer only through an explicitly configured, accessible UNC sleep share.
-    Stage, verify, then replace our own fixed filename; never remove other photos.
-    """
-    if not settings.wifi_share:
-        raise RuntimeError("尚未設定已確認可存取的 Wi-Fi sleep 共享路徑；PNG 已保留在本機")
-    settings.validate()
-    target = Path(settings.wifi_share)
-    if not target.is_dir():
-        raise RuntimeError("無法存取指定的 Wi-Fi sleep 共享資料夾")
-    final = target / Path(source).name
-    temp = target / ("." + final.name + "." + uuid.uuid4().hex + ".tmp")
-    try:
-        shutil.copyfile(source, temp)
-        if sha256(temp) != expected_hash:
-            raise RuntimeError("Wi-Fi 暫存檔回讀 SHA-256 不符")
-        os.replace(temp, final)
-        if sha256(final) != expected_hash:
-            raise RuntimeError("Wi-Fi 目標檔回讀 SHA-256 不符")
-    finally:
-        temp.unlink(missing_ok=True)
-    return str(final)
-
 def pico_wake(port, log):
     if not port:
         return "未設定 Pico，略過 F12"
@@ -210,12 +182,11 @@ def pico_wake(port, log):
         return "Pico 喚醒略過：" + str(exc)
 
 class Processor:
-    """No simultaneous jobs; source snapshot + SHA256 + persistent delivery state."""
-    def __init__(self, state_path=STATE, render=render_png, upload=wifi_upload, wake=pico_wake):
+    """Persist completed local renders; never claim an unverified remote update."""
+    def __init__(self, state_path=STATE, render=render_png):
         self.state_path = state_path
-        self.sent = read_json(state_path, {})
-        self.render, self.upload, self.wake = render, upload, wake
-        self.rendered = {}
+        self.rendered = read_json(state_path, {})
+        self.render = render
 
     def check(self, settings, force=False, log=lambda msg: None):
         settings.validate()
@@ -223,33 +194,23 @@ class Processor:
         if not src.is_file():
             return "等待 " + src.name
         digest = sha256(src)
-        key = settings.delivery_key()
-        sent = self.sent.get(key)
-        if (not force and isinstance(sent, dict) and sent.get("source") == digest
-                and dst.is_file() and sent.get("png") == sha256(dst)):
+        key = settings.render_key()
+        record = self.rendered.get(key)
+        if (not force and isinstance(record, dict) and record.get("source") == digest
+                and dst.is_file() and record.get("png") == sha256(dst)):
             return "無更新：" + src.name
-        cache_key = str(dst.resolve())
-        if (force or not dst.is_file()
-                or self.rendered.get(cache_key) != (digest, sha256(dst))):
-            with tempfile.TemporaryDirectory(prefix="mooink_source_") as directory:
-                snapshot = Path(directory) / src.name
-                shutil.copyfile(src, snapshot)
-                if sha256(snapshot) != digest or sha256(src) != digest:
-                    return "Word 正在儲存，稍後重試"
-                log("正在轉換 " + src.name)
-                self.render(snapshot, dst, settings.size)
-            self.rendered[cache_key] = (digest, sha256(dst))
+        with tempfile.TemporaryDirectory(prefix="mooink_source_") as directory:
+            snapshot = Path(directory) / src.name
+            shutil.copyfile(src, snapshot)
+            if sha256(snapshot) != digest or sha256(src) != digest:
+                return "Word 正在儲存，稍後重試"
+            log("正在轉換 " + src.name)
+            self.render(snapshot, dst, settings.size)
         if sha256(src) != digest:
             return "Word 已再更新，稍後重試最新版本"
-        if not settings.wifi_share:
-            return dst.name + " 已輸出；Wi-Fi sleep 共享尚未設定，不送 F12"
-        log("正在傳送並回讀驗證 " + dst.name)
-        remote = self.upload(settings, dst, sha256(dst))
-        # Persist successful transfer before optional wake, preventing repeated
-        # upload when Pico is unavailable. Transfer failure stays retryable.
-        self.sent[key] = {"source": digest, "png": sha256(dst)}
-        write_json(self.state_path, self.sent)
-        return "已驗證傳送 " + remote + "；" + self.wake(settings.pico_port, log)
+        self.rendered[key] = {"source": digest, "png": sha256(dst)}
+        write_json(self.state_path, self.rendered)
+        return dst.name + " 已輸出；原生 Wi-Fi 休眠圖片寫入尚未驗證"
 
 def main():
     import tkinter as tk
@@ -313,7 +274,7 @@ def main():
     for index,(name,label) in enumerate([
         ("watch_dir","監控資料夾"), ("size","mooInk 尺寸"),
         ("interval_sec","檢查秒數"), ("mooink_ip","mooInk Wi-Fi IP"),
-        ("pico_port","Pico COM（空白停用）"), ("wifi_share","Wi-Fi sleep 共享路徑")]):
+        ("pico_port","Pico COM（空白停用）")]):
         ttk.Label(frame,text=label).grid(row=index,column=0,sticky="w",pady=5)
         fields[name] = tk.StringVar(value=str(getattr(settings,name)))
         if name=="size":
@@ -322,7 +283,7 @@ def main():
             widget=ttk.Entry(frame,textvariable=fields[name],width=47)
         widget.grid(row=index,column=1,sticky="ew",padx=8)
     ttk.Button(frame,text="瀏覽",command=lambda: fields["watch_dir"].set(filedialog.askdirectory() or fields["watch_dir"].get())).grid(row=0,column=2)
-    ttk.Label(frame,text="10.3：mooink_display_10.docx → mooink_display_10.png\n13.3：mooink_display_13.docx → mooink_display_13.png\n未設定共享路徑時只產生 PNG，不會假裝上傳成功或送 F12。",wraplength=530).grid(row=6,column=0,columnspan=3,sticky="w",pady=8)
+    ttk.Label(frame,text="10.3：mooink_display_10.docx → mooink_display_10.png\n13.3：mooink_display_13.docx → mooink_display_13.png\nWi-Fi API 休眠圖片寫入尚待驗證；可先測試配對及 F12。",wraplength=530).grid(row=6,column=0,columnspan=3,sticky="w",pady=8)
     ttk.Label(frame,textvariable=status_text,wraplength=550).grid(row=7,column=0,columnspan=3,sticky="w",pady=5)
     def save():
         nonlocal settings, force_pending
@@ -337,7 +298,7 @@ def main():
             root.withdraw()
         except (ValueError,OSError) as exc:
             messagebox.showerror("設定錯誤", str(exc), parent=root)
-    wifi_box = ttk.LabelFrame(frame, text="mooInk Wi-Fi API 配對（不需要共享路徑）", padding=8)
+    wifi_box = ttk.LabelFrame(frame, text="mooInk 原生 Wi-Fi API 配對", padding=8)
     wifi_box.grid(row=8,column=0,columnspan=3,sticky="ew",pady=(4,8))
     wifi_status = tk.StringVar(value="尚未測試目前 IP 的配對狀態")
     ttk.Label(wifi_box,textvariable=wifi_status,wraplength=540).pack(anchor="w")
@@ -373,6 +334,16 @@ def main():
                 parent=root)
             if not directory:
                 return
+        port = fields["pico_port"].get().strip()
+        if action == "wake":
+            if not port:
+                wifi_status.set("未設定 Pico COM，略過 F12")
+                return
+            if not re.fullmatch(r"COM[1-9][0-9]*", port, re.I):
+                messagebox.showerror("COM 錯誤","請輸入 COM6 等有效 COM 埠",parent=root)
+                return
+            if not messagebox.askyesno("測試 F12","將送出 F12 至 Pico 已配對的閱讀器，請確認目標裝置。",parent=root):
+                return
         pairing_busy = True
         for button in action_buttons:
             button.configure(state="disabled")
@@ -397,6 +368,8 @@ def main():
                     result = ("已驗證並匯入加密憑證", device)
                 elif action == "folders":
                     result = inspect_folders(ip)
+                elif action == "wake":
+                    result = pico_wake(port, logger.info)
                 else:
                     result = ("已通過 Wi-Fi API 認證", test_connection(ip))
                 events.put(("wifi_result", (ip, action, result, None)))
@@ -408,7 +381,7 @@ def main():
         threading.Thread(target=run, daemon=True).start()
 
     for label, action in (("Wi-Fi 配對","pair"),("匯入既有憑證","import"),
-                          ("測試連線","test"),("查詢資料夾","folders")):
+                          ("測試連線","test"),("查詢資料夾","folders"),("測試 F12","wake")):
         button = ttk.Button(wifi_buttons,text=label,command=lambda a=action: wifi_job(a))
         button.pack(side="left",padx=3)
         action_buttons.append(button)
@@ -423,7 +396,7 @@ def main():
         return lambda *_: events.put((action,None))
     tray=pystray.Icon("mooink_display",icon,"mooInk Display Watcher",pystray.Menu(
         pystray.MenuItem("設定／Wi-Fi 配對",tray_action("settings"),default=True),
-        pystray.MenuItem("立即重新轉圖與傳送",tray_action("check")),
+        pystray.MenuItem("立即重新轉圖",tray_action("check")),
         pystray.MenuItem("開啟監控目錄",tray_action("folder")),
         pystray.MenuItem("開啟執行記錄",tray_action("log")),
         pystray.MenuItem("結束",tray_action("exit"))))
@@ -456,6 +429,9 @@ def main():
                     wifi_status.set(ip + "：" + error)
                     logger.info("Wi-Fi API %s: %s", ip, error)
                     messagebox.showwarning("Wi-Fi 操作", error, parent=root)
+                elif operation == "wake":
+                    wifi_status.set(result)
+                    logger.info("Pico test: %s",result)
                 elif operation == "folders":
                     folders = result["folders"]
                     sleep = result["sleep"]

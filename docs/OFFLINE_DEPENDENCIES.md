@@ -47,7 +47,7 @@ The code never hardcodes the USB instance IDs or IP addresses. The diagnostic to
 ## Scope and limitations
 
 - The authenticated Sony-compatible Wi-Fi API can list documents even when the tested original mooInk Pro is asleep; it is **not** a proven method for wake/sleep or writing to the `sleep` directory.
-- The sleep-screen manager uses Windows USB/MTP for confirmed `sleep` storage access; its Wi-Fi file functions require an **existing, user-provided mounted share** pointing at a real `sleep` folder. A generic `--ip` **does not** create an MTP-over-Wi-Fi file API.
+- The sleep-screen manager uses Windows USB/MTP for sleep storage access. The native Wi-Fi API supports pairing and read-only discovery; sleep PNG upload is not yet verified.
 - The `display-document` endpoint changes PDF pages when awake, but user's tests showed it **did not** wake the sleeping panel.
 - Excel/Word conversion additionally requires locally installed Microsoft Office or LibreOffice. Those applications are **not** bundled in the offline wheel archive.
 - Source is archived without cryptographic upstream attestations; review new versions before updating.

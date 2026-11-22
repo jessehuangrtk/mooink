@@ -3,17 +3,15 @@
 """mooInk first-generation sleep-screen manager (Windows / Python 3.9+).
 
 Two public classes:
-  MooinkLowLevel       -- explicit portable USB MTP / local mounted share operations
+  MooinkLowLevel       -- explicit portable USB MTP operations
   SleepScreenManager   -- image, Excel, Word conversion + interactive functions
 
 Image sizes: 10.3" 1404x1872, 13.3" 1650x2200. Landscape output is
 rotated canvas dimensions; user rotates the actual reader for viewing.
 
-Native Sony-compatible Wi-Fi API is verified for *Document* management,
-not for the external sleep folder. This tool NEVER pretends that a Sony
-Document API call writes to /sleep. Wi-Fi sleep CRUD requires a verified
-OS-visible mounted network folder: --wifi-share \\server\\share\\sleep.
-Without it, Wi-Fi only does a read-only connection check to 8080/8443.
+Native Sony-compatible Wi-Fi API is verified for Document management,
+not for the external sleep folder. Wi-Fi here is read-only TCP probing.
+Sleep file management uses USB MTP only.
 
 Files are prepared locally before transfer; the device will not necessarily
 refresh e-ink display until a real sleep transition.
@@ -93,25 +91,22 @@ def cleanup_empty_backup_dirs(backup_dir):
 
 
 class MooinkLowLevel:
-    """Low-level transport: Windows Shell MTP or an explicitly mounted share.
+    """Low-level transport: Windows USB MTP; optional read-only Wi-Fi probe.
 
     No device serial is hard-coded. With two devices connected, Shell shows
     both; for write/delete of indistinguishable USB devices, disconnect one.
     """
 
     def __init__(self, transport="usb", ip: Optional[str] = None,
-                 wifi_share: Optional[str] = None, usb_index: Optional[int] = None):
+                 usb_index: Optional[int] = None):
         self.transport = transport
         self.ip = ip
         self.usb_index = usb_index
-        self.wifi_share = Path(wifi_share) if wifi_share else None
         self._shell = None
         self._usb_devices = None
         self._folder = None
         if transport not in ("usb", "wifi"):
             raise ValueError("transport must be usb or wifi")
-        if self.wifi_share and self.wifi_share.name.lower() != "sleep":
-            raise ValueError("--wifi-share 必須直接指向名稱為 sleep 的資料夾")
 
     def wifi_probe(self):
         if not self.ip:
@@ -199,16 +194,15 @@ class MooinkLowLevel:
                                 pass
         raise RuntimeError("MTP 找不到 sleep 資料夾；沒有自動建立或猜測目錄")
 
+    def _require_usb(self):
+        if self.transport != "usb":
+            raise NotImplementedError("Wi-Fi API 尚未驗證 sleep 存取；請使用 USB MTP。")
+
     def _target(self, write=False):
-        if self.transport == "usb":
-            if write and len(self.usb_devices()) > 1:
-                raise RuntimeError("同時接了兩台同名 mooInk；為避免刪錯／傳錯，請先拔除另一台再寫入")
-            return self._usb_sleep_folder()
-        if self.wifi_share and self.wifi_share.is_dir():
-            return self.wifi_share
-        raise NotImplementedError(
-            "Sony Wi-Fi API 目前只驗證 Document，沒有驗證 sleep 資料夾的 API。"
-            "請使用 USB，或明確掛載並提供 --wifi-share \\server\\share\\sleep。")
+        self._require_usb()
+        if write and len(self.usb_devices()) > 1:
+            raise RuntimeError("同時接了兩台同名 mooInk；為避免刪錯／傳錯，請先拔除另一台再寫入")
+        return self._usb_sleep_folder()
 
     @staticmethod
     def _mtp_size(item):
@@ -232,9 +226,6 @@ class MooinkLowLevel:
 
     def list_sleep(self):
         target = self._target()
-        if isinstance(target, Path):
-            return [{"name": x.name, "size": x.stat().st_size} for x in sorted(target.iterdir())
-                    if x.is_file() and x.suffix.lower() in OUTPUT_EXTS]
         items = []
         for item in target.Items():
             n = str(item.Name)
@@ -254,46 +245,13 @@ class MooinkLowLevel:
         if not path.is_file() or path.suffix.lower() not in OUTPUT_EXTS:
             raise ValueError("只接受已產生的 JPG/PNG 檔案")
 
-        def notify(stage, **fields):
-            if progress:
-                try:
-                    progress(stage, fields)
-                except Exception:
-                    pass
-
-        if self.transport == "usb":
-            if len(self.usb_devices()) != 1:
-                raise RuntimeError("USB 上傳僅允許同時連接一台 mooInk；請確認裝置")
-            if overwrite:
-                raise ValueError("USB 不允許無備份覆寫已有檔案")
-            from mook_mtp_wpd import upload_one
-            return upload_one(path, progress=progress)
-
-        target = self._target(write=True)
-        if not isinstance(target, Path):
-            raise RuntimeError("Wi-Fi 上傳需要已掛載的 sleep 資料夾")
-        names = {p["name"].casefold() for p in self.list_sleep()}
-        if path.name.casefold() in names and not overwrite:
-            raise FileExistsError("sleep 已有同名檔案：" + path.name)
-        destination = target / path.name
-        notify("uploading", message="正在複製到已掛載的 sleep 資料夾",
-               copied=0, total=path.stat().st_size)
-        shutil.copy2(path, destination)
-        notify("verifying", message="檢查共享資料夾複製後的 SHA-256",
-               copied=destination.stat().st_size, total=path.stat().st_size)
-        if destination.stat().st_size != path.stat().st_size:
-            raise RuntimeError("共享 sleep 檔案大小不符，不宣稱成功")
-        def sha256(src):
-            digest = hashlib.sha256()
-            with src.open("rb") as stream:
-                for block in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(block)
-            return digest.digest()
-        if sha256(path) != sha256(destination):
-            raise RuntimeError("共享 sleep 檔案 SHA-256 不一致，不宣稱成功")
-        notify("verified", message="已掛載 sleep 共享檔案 SHA-256 驗證成功",
-               copied=path.stat().st_size, total=path.stat().st_size)
-        return "uploaded+sha256-verified; sleep: " + path.name
+        self._require_usb()
+        if len(self.usb_devices()) != 1:
+            raise RuntimeError("USB 上傳僅允許同時連接一台 mooInk；請確認裝置")
+        if overwrite:
+            raise ValueError("USB 不允許無備份覆寫已有檔案")
+        from mook_mtp_wpd import upload_one
+        return upload_one(path, progress=progress)
 
     def backup_and_delete(self, filename: str, backup_dir: Path, *,
                           confirm_delete=True, progress=None, backup_timeout=50.0,
@@ -315,9 +273,8 @@ class MooinkLowLevel:
         notify("locate", message="確認裝置及圖片")
         if Path(filename).name != filename or Path(filename).suffix.lower() not in OUTPUT_EXTS:
             raise ValueError("只能刪除 sleep 根目錄下的 JPG/PNG，且不可使用路徑")
+        self._require_usb()
         if quiet_wpd:
-            if self.transport != "usb":
-                raise RuntimeError("靜默 WPD 刪除僅限 USB；Wi-Fi 共享資料夾不需此模式")
             # Cross-check Windows Shell's recognized mooInk count before WPD
             # opens any device. Never silently fall back to Explorer verbs.
             if len(self.usb_devices()) != 1:
@@ -350,27 +307,6 @@ class MooinkLowLevel:
                     return location / filename
                 except FileExistsError:
                     counter += 1
-        if isinstance(target, Path):
-            src = target / filename
-            expected_size = src.stat().st_size
-            backup = reserve_backup_path()
-            notify("backup_target", message="本機備份位置：" + str(backup))
-            notify("copying", message="複製共享資料夾圖片", copied=0, total=expected_size)
-            shutil.copy2(src, backup)
-            notify("verifying", message="確認備份大小", copied=backup.stat().st_size,
-                   total=expected_size)
-            if not backup.exists() or backup.stat().st_size != src.stat().st_size:
-                raise RuntimeError("備份驗證失敗，拒絕刪除")
-            if not delete_after:
-                notify("verified", message="備份完成，不刪除原檔")
-                return "backup-only-verified; backup: " + str(backup)
-            notify("deleting", message="備份已驗證，正在刪除")
-            src.unlink()
-            if src.exists():
-                raise RuntimeError("共享資料夾刪除結果未確認，請手動檢查；備份已保留：" + str(backup))
-            notify("deleted", message="已確認刪除")
-            return "deleted+verified; backup: " + str(backup)
-
         # Windows MTP Shell.CopyHere may finish asynchronously, show a
         # transfer dialog, or only publish the destination at the end.
         # Do not infer success from CopyHere returning.
@@ -666,7 +602,7 @@ class SleepScreenManager:
         Without continue_on_error the original tuple return format remains.
         """
         if self.io is None:
-            raise RuntimeError("尚未指定 USB 或已掛載的 Wi-Fi sleep 目錄")
+            raise RuntimeError("尚未指定 USB mooInk 裝置")
         if operation == "list":
             return self.io.list_sleep()
         if operation == "add":
@@ -912,7 +848,6 @@ def main(argv=None):
     parser.add_argument("--fit", choices=("smart","cover","contain"), default="smart")
     parser.add_argument("--transport", choices=("usb", "wifi"), default="usb")
     parser.add_argument("--ip", help="mooInk 的 LAN IP；只用於探測，不假設可存取 sleep")
-    parser.add_argument("--wifi-share", help="已掛載、確定可存取的遠端 sleep 資料夾；非 Sony 原生 API")
     parser.add_argument("--usb-index", type=int, help="USB 順序編號；兩台同名設備的寫入仍會被禁止")
     parser.add_argument("--input", nargs="+", help="批次轉檔：圖片、Excel、Word、PDF")
     parser.add_argument("--output-dir", default="mooink_prepared")
@@ -920,8 +855,9 @@ def main(argv=None):
     parser.add_argument("--files", nargs="*", help="新增／刪除指定檔案或檔名")
     parser.add_argument("--backup-dir", default="mooink_backup")
     args = parser.parse_args(argv)
-    io_layer = MooinkLowLevel(transport=args.transport, ip=args.ip, wifi_share=args.wifi_share,
-                             usb_index=args.usb_index)
+    if args.transport == "wifi" and args.action not in ("probe", "convert"):
+        parser.error("Wi-Fi 目前僅支援連線探測；sleep 檔案操作請使用 USB")
+    io_layer = MooinkLowLevel(transport=args.transport, ip=args.ip, usb_index=args.usb_index)
     mgr = SleepScreenManager(size=args.size, orientation=args.orientation,
                              fit=args.fit, output_dir=args.output_dir, io_layer=io_layer)
     try:

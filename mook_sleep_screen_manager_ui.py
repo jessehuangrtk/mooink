@@ -79,9 +79,7 @@ class MooinkSleepUI:
         self.prepared_folder_label = tk.StringVar()
         self.orientation = tk.StringVar(value="auto")
         self.fit = tk.StringVar(value="smart")
-        self.transport = tk.StringVar(value="usb")
         self.device_ip = tk.StringVar()
-        self.wifi_share = tk.StringVar()
         self.status = tk.StringVar(value="就緒：先匯入圖片，或連接 USB mooInk。")
         self.backup_timeout = tk.StringVar(value="50")
         self.backup_batch_label = tk.StringVar(value="批次進度：尚未開始")
@@ -108,7 +106,6 @@ class MooinkSleepUI:
         self._update_prepared_folder()
         self.device_size.trace_add("write", self._device_size_changed)
         self.output_dir.trace_add("write", lambda *_args: self._update_prepared_folder())
-        self.wifi_share.trace_add("write", lambda *_args: self._invalidate_sleep())
         self.root.after(100, self._drain)
         self.root.after(350, self._backup_tick)
         self._log("UI 已啟動；所有裝置檔案操作由 mook_sleep_screen_manager.py 執行。")
@@ -134,7 +131,7 @@ class MooinkSleepUI:
         ttk.Label(shell, text="mooInk Pro 休眠畫面管理", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             shell, style="Subtitle.TLabel",
-            text="10.3 / 13.3 吋 · 圖片與 Office/PDF 轉換 · Windows USB MTP · Wi-Fi 僅支援已掛載的 sleep 共享資料夾",
+            text="10.3 / 13.3 吋 · 圖片與 Office/PDF 轉換 · Windows USB MTP · Wi-Fi API 連線探測",
         ).pack(anchor="w", pady=(2, 12))
         notebook = ttk.Notebook(shell)
         notebook.pack(fill="both", expand=True)
@@ -240,10 +237,7 @@ class MooinkSleepUI:
         conn.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         first = ttk.Frame(conn)
         first.pack(fill="x")
-        ttk.Radiobutton(first, text="USB MTP（Windows）", variable=self.transport, value="usb",
-                        command=self._invalidate_sleep).pack(side="left")
-        ttk.Radiobutton(first, text="已掛載 Wi-Fi sleep 共享目錄", variable=self.transport, value="wifi",
-                        command=self._invalidate_sleep).pack(side="left", padx=24)
+        ttk.Label(first, text="USB MTP（Windows）").pack(side="left")
         size_row = ttk.Frame(conn)
         size_row.pack(fill="x", pady=(10, 0))
         ttk.Label(size_row, text="目前 mooInk 尺寸").pack(side="left")
@@ -271,16 +265,10 @@ class MooinkSleepUI:
         ttk.Label(iprow, text="裝置 IP").pack(side="left")
         ttk.Entry(iprow, textvariable=self.device_ip, width=20).pack(side="left", padx=(8, 16))
         ttk.Button(iprow, text="8080 / 8443 網路探測", command=self._probe_wifi).pack(side="left")
-        share = ttk.Frame(conn)
-        share.pack(fill="x", pady=(8, 0))
-        ttk.Label(share, text="Wi-Fi sleep 共享路徑").pack(side="left")
-        ttk.Entry(share, textvariable=self.wifi_share).pack(side="left", fill="x", expand=True, padx=8)
-        ttk.Button(share, text="瀏覽", command=self._choose_share).pack(side="left")
-
         note = ttk.Label(
             tab, style="Subtitle.TLabel", wraplength=980,
             text="安全提示：同時接上兩台 USB mooInk 時，為避免誤寫，後端會拒絕寫入／刪除。"
-                 "只有連線成功不代表能控制電子紙喚醒；Wi-Fi IP 本身不能當作 sleep 共享資料夾。",
+                 "Wi-Fi 僅供 API 連線探測；休眠圖片管理使用 USB。",
         )
         note.grid(row=1, column=0, sticky="w", pady=(0, 10))
 
@@ -390,11 +378,6 @@ class MooinkSleepUI:
             return
         self._log("清理空白備份子目錄：%d 個（未刪除檔案）" % len(removed))
         messagebox.showinfo("清理完成", "已清理 %d 個空白子目錄。\n沒有刪除任何圖片或其他檔案。" % len(removed))
-
-    def _choose_share(self):
-        path = filedialog.askdirectory(title="選擇已掛載的 sleep 資料夾")
-        if path:
-            self.wifi_share.set(path)
 
     def _add_inputs(self):
         paths = filedialog.askopenfilenames(
@@ -710,17 +693,11 @@ class MooinkSleepUI:
         self._task("搜尋 USB 裝置", work, done)
 
     def _transport_snapshot(self):
-        mode = self.transport.get()
         ip = self.device_ip.get().strip() or None
-        share = self.wifi_share.get().strip() or None
-        if mode == "usb":
-            index = self.device_combo.current()
-            if index < 0 or index >= len(self._device_names):
-                raise ValueError("請先按『重新搜尋』，再選取 USB 裝置。")
-            return {"transport": "usb", "ip": ip, "usb_index": index + 1}
-        if not share:
-            raise ValueError("Wi-Fi 檔案管理需要已掛載、且名稱為 sleep 的共享資料夾；只有 IP 不夠。")
-        return {"transport": "wifi", "ip": ip, "wifi_share": share}
+        index = self.device_combo.current()
+        if index < 0 or index >= len(self._device_names):
+            raise ValueError("請先按『重新搜尋』，再選取 USB 裝置。")
+        return {"transport": "usb", "ip": ip, "usb_index": index + 1}
 
     def _device_job(self, title, action, done, *, writing=False, backup_batch=None):
         if self._busy:

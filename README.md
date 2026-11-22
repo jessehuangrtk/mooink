@@ -101,7 +101,7 @@ GUI 的 **「選擇 JPG / PNG 上傳」** 使用 `mook_sleep_screen_manager.py` 
 ## Wi-Fi 的使用範圍
 
 - 輸入 mooInk LAN IP 後可以探測 TCP 8080／8443 的可達性，**不能藉此讀寫 sleep 目錄**。
-- Wi-Fi 檔案管理只支援你已經在作業系統**掛載、實際可讀寫**的遠端資料夾，且所選路徑最後一層必須叫做 sleep，例如某個已驗證的 SMB 共享資料夾。它**不是** mooInk 原廠 API 的既有功能保證。
+- Wi-Fi 僅提供原生 API 探測、配對及資料夾查詢；sleep 圖片管理目前使用 USB MTP。
 - 先前實機測試確認第一代裝置在休眠時仍可回應部分 Wi-Fi API；但遠端 PDF 顯示命令沒有使休眠電子紙直接喚醒。
 
 詳情見 [research/remote_wake_strategy.md](research/remote_wake_strategy.md) 及 [research/mtp_usb_findings.md](research/mtp_usb_findings.md)。
@@ -141,7 +141,7 @@ py mooink_full_cmd_demo.py --ip 192.168.1.137
 ## mooInk Word 顯示監控（Windows 系統匣）
 
 執行：python -m pip install -r requirements.txt，然後 python mooink_display_watcher.py。
-第一次啟動出現設定視窗，儲存後常駐系統匣。設定檔及成功傳送狀態位於 %LOCALAPPDATA%\mooink。
+第一次啟動出現設定視窗，儲存後常駐系統匣。設定檔及成功轉圖狀態位於 %LOCALAPPDATA%\mooink。
 預設檢查間隔 60 秒、尺寸 10.3、IP 192.168.1.140、Pico COM6（清空 COM 欄位可停用）。
 
 | 尺寸 | 監控 Word | 產出 PNG | 自訂 Word 紙張寬×高 |
@@ -159,7 +159,7 @@ py mooink_full_cmd_demo.py --ip 192.168.1.137
 
 兩個 Word 都設直式、0.5 cm 邊界、單頁。程式依目前設定的裝置尺寸監控對應 DOCX，保留兩個尺寸獨立檔名，不會傳錯另一尺寸。需要 Word 或 LibreOffice。超過一頁會報錯，不會自動截掉第二頁。
 
-**Wi-Fi 限制：** 尚未證實第一代 mooInk 原生 Sony API 能把 PNG 寫入 sleep。程式只接受明確設定、實際可存取的同 IP UNC sleep 共享資料夾；不猜測 SMB 分享名稱，不會用 dptrp1 上傳 PNG 冒充 sleep 圖更新。未設定共享時只輸出本機 PNG，不送出 F12。若有真實共享，僅更新本程式的同名 PNG，暫存與回讀 SHA-256 驗證成功後才呼叫 Pico F12；Pico 不存在或未設定時略過。未確認實機能經此方式顯示該 PNG。裝置須已選取適當休眠圖並設好 15 秒自動休眠。
+**Wi-Fi 限制：** 第一代 mooInk 原生 API 寫入 sleep PNG 尚未驗證。監控程式目前自動轉換本機 PNG；配對及資料夾查詢保留，F12 可在設定視窗手動測試。待原生 API 傳送成功驗證後再啟用自動喚醒。
 
 
 
@@ -173,5 +173,5 @@ py mooink_full_cmd_demo.py --ip 192.168.1.137
 
 憑證依閱讀器的動態識別碼保存在 %LOCALAPPDATA%\mooink_interactive_lab\auth，與 mooink_full_cmd_demo.py 共用，不依 IP 單獨存取、不寫入 Git 或一般 JSON 設定檔。IP 改變或更換裝置時，會重新確認裝置身分；其他裝置的憑證不會被覆寫。PIN、私鑰及配對回應不記錄至 log。
 
-配對／查詢資料夾不需要 SMB 路徑，但這不表示 PNG 可以透過原生 API 寫進 sleep。自動 PNG 傳送仍只使用實際可存取的共享路徑；沒有共享時保留本機 PNG，不會假裝傳送成功或發 F12。
+配對與查詢資料夾使用原生 Wi-Fi API。尚未驗證休眠 PNG 直接傳送，不會在只有本機轉圖完成時自動發 F12。
 

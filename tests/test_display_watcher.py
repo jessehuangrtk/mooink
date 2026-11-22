@@ -1,7 +1,6 @@
 import tempfile
 import unittest
 from pathlib import Path
-from dataclasses import replace
 from mooink_display_watcher import (Settings, Processor, sha256,
                                     initialize_workfiles, TEMPLATE_DIR, WORK_FILES)
 
@@ -12,15 +11,7 @@ class WatcherTests(unittest.TestCase):
                 s=Settings(watch_dir=tmp,size=size).validate()
                 self.assertEqual([p.name for p in s.paths()],
                                  ["mooink_display_"+tag+".docx","mooink_display_"+tag+".png"])
-    def test_validate_target(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            s=Settings(watch_dir=tmp,wifi_share=r"\\192.168.1.140\shared\sleep")
-            self.assertIs(s.validate(),s)
-            with self.assertRaises(ValueError):
-                replace(s,mooink_ip="192.168.1.141").validate()
-            with self.assertRaises(ValueError):
-                replace(s,wifi_share=r"\\192.168.1.140\shared\documents").validate()
-    def test_local_render_without_share_never_wakes(self):
+    def test_local_render_and_restart_skip_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
             s=Settings(watch_dir=tmp,size="10.3")
             source,output=s.paths()
@@ -29,52 +20,28 @@ class WatcherTests(unittest.TestCase):
             def render(src,dst,size):
                 calls.append(size)
                 dst.write_bytes(b"png")
-            def forbidden(*args):
-                self.fail("Unexpected transfer/wake")
-            p=Processor(Path(tmp)/"state.json", render, forbidden, forbidden)
-            p.check(s)
-            p.check(s)
+            state=Path(tmp)/"state.json"
+            p=Processor(state, render)
+            self.assertIn("尚未驗證", p.check(s))
+            self.assertIn("無更新", p.check(s))
+            self.assertIn("無更新", Processor(state, render).check(s))
             self.assertEqual(calls,["10.3"])
             self.assertTrue(output.is_file())
-    def test_upload_verified_before_wake_and_no_repeat_on_restart(self):
+
+    def test_render_failure_retries_without_marking_done(self):
         with tempfile.TemporaryDirectory() as tmp:
-            s=Settings(watch_dir=tmp,size="13.3",wifi_share=r"\\192.168.1.140\shared\sleep")
-            source,output=s.paths()
-            source.write_bytes(b"docx")
-            calls=[]
-            def render(src,dst,size):
-                calls.append(("render",size))
-                dst.write_bytes(b"png")
-            def upload(settings,src,digest):
-                self.assertEqual(sha256(src),digest)
-                calls.append(("upload",src.name))
-                return str(src)
-            def wake(port,log):
-                calls.append(("wake",port))
-                return "skip"
-            state=Path(tmp)/"state.json"
-            p=Processor(state,render,upload,wake)
-            p.check(s)
-            Processor(state,render,upload,wake).check(s)
-            self.assertEqual(calls,[("render","13.3"),("upload","mooink_display_13.png"),("wake","COM6")])
-    def test_failed_upload_retries_without_wake(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            s=Settings(watch_dir=tmp,wifi_share=r"\\192.168.1.140\shared\sleep")
+            s=Settings(watch_dir=tmp)
             s.paths()[0].write_bytes(b"docx")
             attempts=[]
-            def render(src,dst,size):
-                dst.write_bytes(b"png")
             def fail(*args):
                 attempts.append(1)
-                raise OSError("offline")
-            def wake(*args):
-                self.fail("F12 must not be sent")
-            p=Processor(Path(tmp)/"state.json",render,fail,wake)
+                raise OSError("render failed")
+            p=Processor(Path(tmp)/"state.json", fail)
             for _ in range(2):
                 with self.assertRaises(OSError):
                     p.check(s)
             self.assertEqual(len(attempts),2)
-            self.assertEqual(p.sent,{})
+            self.assertEqual(p.rendered,{})
 
     def test_workfiles_copied_from_tracked_templates_without_overwriting(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -107,19 +74,18 @@ class WatcherTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Settings(watch_dir=str(TEMPLATE_DIR)).validate()
 
-    def test_recreated_png_is_not_mistaken_for_already_delivered_image(self):
+    def test_recreated_png_is_not_mistaken_for_current_render(self):
         with tempfile.TemporaryDirectory() as tmp:
-            s = Settings(watch_dir=tmp, wifi_share=r"\\192.168.1.140\shared\sleep")
+            s = Settings(watch_dir=tmp)
             source, output = s.paths()
             source.write_bytes(b"docx")
             attempts = []
             def render(src, dst, size):
+                attempts.append(size)
                 dst.write_bytes(b"rendered PNG")
-            def upload(settings, src, digest):
-                attempts.append(src.read_bytes())
-                return str(src)
-            p = Processor(Path(tmp) / "state.json", render, upload, lambda *args: "skip")
+            p = Processor(Path(tmp) / "state.json", render)
             p.check(s)
             output.write_bytes(b"placeholder PNG")
             p.check(s)
-            self.assertEqual(attempts, [b"rendered PNG", b"rendered PNG"])
+            self.assertEqual(attempts, ["10.3", "10.3"])
+            self.assertEqual(output.read_bytes(), b"rendered PNG")
