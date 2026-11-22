@@ -93,3 +93,78 @@ class WatcherTests(unittest.TestCase):
             p.check(s)
             self.assertEqual(attempts, ["10.3", "10.3"])
             self.assertEqual(output.read_bytes(), b"rendered PNG")
+
+
+    def test_delivery_order_and_retry(self):
+        from unittest.mock import Mock
+        from dataclasses import replace
+        with tempfile.TemporaryDirectory() as tmp:
+            s = Settings(watch_dir=tmp, enable_wifi_cover=True)
+            src, png = s.paths()
+            src.write_bytes(b"Word")
+            actions = []
+            client = Mock()
+            def render(src, dst, size):
+                actions.append("render")
+                dst.write_bytes(b"png")
+            def upload(client, pdf, log):
+                self.assertTrue(pdf.read_bytes().startswith(b"%PDF-"))
+                actions.append("verify-upload")
+                return "doc-id"
+            def wake(port, log):
+                actions.append("wake")
+                return "F12 已送出"
+            def open_pdf(client, doc_id):
+                actions.append("open")
+                return 200
+            p = Processor(Path(tmp)/"state.json", render, fake_pdf,
+                          connect=lambda ip: (client, "reader1"),
+                          identify=lambda ip: "reader1", upload=upload,
+                          open_pdf=open_pdf, wake=wake,
+                          delay=lambda seconds: actions.append("delay"))
+            self.assertIn("HTTP 200", p.check(s))
+            self.assertEqual(actions, ["render","verify-upload","wake","delay","open"])
+            self.assertIn("無更新", p.check(s))
+            self.assertEqual(len(actions),5)
+            self.assertTrue(png.with_suffix(".pdf").is_file())
+            # New device at same IP must not reuse old delivery state.
+            p.identify=lambda ip: "reader2"
+            p.connect=lambda ip: (client, "reader2")
+            p.check(s)
+            self.assertEqual(actions[-4:], ["verify-upload","wake","delay","open"])
+
+    def test_upload_failure_never_opens_or_wakes(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            s = Settings(watch_dir=tmp, enable_wifi_cover=True)
+            s.paths()[0].write_bytes(b"Word")
+            client=Mock()
+            render=lambda src,dst,size: dst.write_bytes(b"png")
+            upload=Mock(side_effect=OSError("offline"))
+            wake, open_pdf=Mock(), Mock()
+            p=Processor(Path(tmp)/"state.json",render,fake_pdf,
+                        connect=lambda ip:(client,"reader1"),identify=lambda ip:"reader1",
+                        upload=upload,open_pdf=open_pdf,wake=wake)
+            for _ in range(2):
+                with self.assertRaises(OSError):
+                    p.check(s)
+            self.assertEqual(upload.call_count,2)
+            wake.assert_not_called()
+            open_pdf.assert_not_called()
+            self.assertEqual(client.session.close.call_count,2)
+
+    def test_missing_pico_still_attempts_open(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            s = Settings(watch_dir=tmp, enable_wifi_cover=True, pico_port="")
+            s.paths()[0].write_bytes(b"Word")
+            client=Mock()
+            open_pdf=Mock(return_value=204)
+            delay=Mock()
+            p=Processor(Path(tmp)/"state.json",lambda src,dst,size: dst.write_bytes(b"png"),fake_pdf,
+                        connect=lambda ip:(client,"reader1"),identify=lambda ip:"reader1",
+                        upload=lambda *args:"doc-id",open_pdf=open_pdf,
+                        wake=lambda *args:"未設定 Pico，略過 F12",delay=delay)
+            self.assertIn("HTTP 204",p.check(s))
+            open_pdf.assert_called_once_with(client,"doc-id")
+            delay.assert_not_called()
