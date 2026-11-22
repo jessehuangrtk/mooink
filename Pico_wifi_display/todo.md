@@ -21,11 +21,11 @@
 - [ ] 原生 CDC + PIO USB Host 雙 USB：需額外 Host 接頭、VBus 安全供電，核對 PIO/Wi-Fi 資源及 SDK 相容性。整合 menu 後驗收。
 
 ## P1 — Wi-Fi / SMB
-- [ ] Pico Wi-Fi 連線及重連、私有設定生成（密碼不提交）。
-- [ ] 移植 libsmb2，固定依賴版本，確認 Pico 2W / FreeRTOS 或 lwIP 相容。
+- [x] 獨立 Wi-Fi/SMB probe：連線重試、私有設定生成（未編譯或實機驗收）。
+- [x] libsmb2 / RP2350 ARM FreeRTOS 依賴固定、獨立 opt-in build（尚待交叉編譯確認）。
 - [ ] 驗證 SMB2/3、NTLMv2、signing required；不降低 Windows 安全設定。
-- [ ] SMB stat、分塊讀取、SHA-256、來源檔案版本一致性。
-- [ ] 設定每 60 秒檢查；同內容跳過，不因時間改變重寫。
+- [x] SMB stat/fstat、分塊讀取、SHA-256、來源版本前後檢查、PNG header 檢查（probe，待實測）。
+- [x] 60 秒可設定輪詢、內容 hash 相同回報 UNCHANGED（只觀測，非寫入完成狀態）。
 - [ ] 整合 SMB 與 USB Host，測量 RAM、逾時及網路斷線。
 - [ ] Windows 端獨立設定與診斷工具（不常駐推送）。
 

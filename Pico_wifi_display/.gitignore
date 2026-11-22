@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 config.local.json
 firmware/config.local.h
+
+firmware/.private_config_*

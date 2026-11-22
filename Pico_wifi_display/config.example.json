@@ -9,7 +9,9 @@
     "username": "mooink_reader",
     "password": "",
     "file": "mooink_display.png",
-    "require_signing": true
+    "require_signing": true,
+    "domain": "",
+    "require_encryption": false
   },
   "poll_seconds": 60,
   "display_size": "10.3",

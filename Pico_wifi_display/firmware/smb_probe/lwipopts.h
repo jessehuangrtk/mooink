@@ -1,0 +1,13 @@
+#pragma once
+/* Use upstream libsmb2 Pico W socket configuration, with NO_SYS=0. */
+#include "lwipopts_examples_common.h"
+#define LWIP_SO_RCVBUF 1
+#define LWIP_TIMEVAL_PRIVATE 0
+#define TCPIP_THREAD_STACKSIZE 2048
+#define DEFAULT_THREAD_STACKSIZE 2048
+#define DEFAULT_RAW_RECVMBOX_SIZE 8
+#define TCPIP_MBOX_SIZE 8
+#define DEFAULT_UDP_RECVMBOX_SIZE 8
+#define DEFAULT_TCP_RECVMBOX_SIZE 8
+#define DEFAULT_ACCEPTMBOX_SIZE 8
+#define LWIP_TCPIP_CORE_LOCKING_INPUT 1

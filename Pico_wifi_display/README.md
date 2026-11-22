@@ -58,3 +58,17 @@ Pico Wi-Fi/SMB2/3 主動讀取 mooink_display.png → 分塊 SHA-256 → USB MTP
 新 target `build/pico_wifi_display_menu.uf2` 是單獨 CDC 設定介面預覽，不執行 USB Host／SMB／Bluetooth。以 Tera Term 連接新 Pico 的原生 USB COM，115200 8N1、Local echo OFF、Transmit CR。任何字元均不逐字回顯，閒置時只按 Enter 顯示主選單；數字 + Enter 選取。Wi-Fi SSID/密碼、SMB server/share/user/密碼、Bluetooth MAC、尺寸與週期可輸入 RAM 草稿；狀態僅顯示密碼是否已設置，重啟會遺失。Bluetooth 真實配對、執行連線及 flash Save/Apply 尚未實作。0 回上一層或離開，再按 Enter 顯示。此 UF2 不會送出鍵盤字元，也不修改 mooInk。
 
 最終希望保留 Pico 原生 USB CDC，另以 PIO USB Host 連接 mooInk（官方 dual mode 架構）。須增加獨立的 USB Host 接頭、適當 USB D+/D- 及保護供電；目前 P0 的 native Host probe 仍獨立，兩個 UF2 不能同時執行。等 PIO Host、CYW43439 PIO/DMA 資源及時序實測通過才整合。若選用原生 USB Host，則設定選單必須改走外接 USB-TTL 或其他介面。不要把 Windows 和 mooInk 同時連到原生 USB 埠。
+
+## P1：獨立 Wi-Fi / SMB 唯讀 probe（待編譯、實機）
+
+另有 `build_smb_wsl.sh`，與 USB Host probe 和 CDC menu 各自獨立。先在本目錄複製 `config.example.json` 為 `config.local.json`，填 Wi-Fi SSID/密碼、Windows server IP、share、SMB 專用帳號/密碼、domain（Windows 本機帳號可填電腦名稱）、尺寸、interval。來源固定 `mooink_display.png`。必須 SMB signing，若 Windows 要求加密設定 require_encryption=true；不允許 guest 或關閉簽章。
+
+~~~bash
+cd Pico_wifi_display
+cp -n config.example.json config.local.json
+# 編輯 config.local.json 後
+bash tests/run.sh
+bash build_smb_wsl.sh
+~~~
+
+UF2：`build/smb/pico_wifi_display_smb_probe.uf2`。私有設定編譯入 UF2（明文可擷取），不要分享 UF2、ELF 或 config.local.*；全部在本目錄 gitignore 範圍內。此探測版不使用 menu 的 RAM 設定，也不更新 mooInk。透過原生 CDC 或 UART 看 log：Wi-Fi connected、SMB CHANGED/UNCHANGED、bytes、SHA256、FreeRTOS heap/stack watermark。比對 Windows Get-FileHash。以 4096 bytes 分塊讀取，限制 16 MiB，兩次 stat 及開檔前後 fstat/stat 必須一致，檢查 PNG header 尺寸及 8-bit grayscale（不是完整 PNG 解碼驗證）。每次都 hash，避免單靠 mtime。任何失敗不會碰 USB。libsmb2 與 RP2350 FreeRTOS 使用固定 commit；交叉編譯、Windows signing/NTLMv2 相容性、RAM 與共存仍未驗證。請勿為了測試降低 Windows 安全政策。
