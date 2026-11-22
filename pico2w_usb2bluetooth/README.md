@@ -113,3 +113,7 @@ EVENT KEY DOWN mod=0 usage=44 hold_ms=60
 EVENT KEY UP
 OK RAW SENT ASCII=0x20 HID=0x2C
 ~~~
+
+### CDC 輸入診斷（cdc_rx=3）
+
+新版直接以 Pico SDK getchar_timeout_us(0) 每 20 ms 非阻塞讀取最多 64 個 CDC byte，避免把讀取逾時當作輸入。COMMAND 模式預設逐字輸出 EVENT RX ASCII=0x..，大小寫皆可，支援 Backspace、Ctrl+U 清除輸入、CR/LF/CRLF；無效字元會明確印出十六進位，該行不執行。PIN 數字遮蔽。HELLO 自動關閉逐字診斷以相容 Python，ECHO ON/OFF 手動開關，Ctrl+] 返回 COMMAND 並重新打開診斷。Tera Term 將 Local echo 關閉，英文半形鍵入 status 再 Enter，STATUS 中應包含 cdc_rx=3、rx_bytes；此時即使尚未配對亦能看見接收診斷。

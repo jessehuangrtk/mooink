@@ -7,7 +7,7 @@
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
 #include "btstack.h"
-#include "btstack_stdin.h"
+#include "pico/stdio.h"
 #include "btstack_tlv.h"
 #include "key_command.h"
 #include "terminal_keys.h"
@@ -40,7 +40,9 @@ static unsigned key_hold_ms=60;
 static bool key_extended;
 static char line[100];
 static unsigned line_len;
-static bool overflow;
+static bool overflow, invalid_line;
+static bool console_echo=true;
+static uint32_t rx_bytes;
 #define RAW_QUEUE_SIZE 32
 static bool keyboard_mode, key_raw, raw_cr;
 static terminal_key_t raw_queue[RAW_QUEUE_SIZE];
@@ -120,14 +122,16 @@ static void report(uint8_t mod,uint8_t usage){
 }
 static void command(char *s){
   key_command_t key;
-  if(!strcmp(s,"HELLO")){puts("OK HELLO MOOINK_PICO2W_BT/1");return;}
+  if(!strcmp(s,"HELLO")){console_echo=false;puts("OK HELLO MOOINK_PICO2W_BT/1");return;}
+  if(!strcmp(s,"ECHO ON")){console_echo=true;puts("OK ECHO ON");return;}
+  if(!strcmp(s,"ECHO OFF")){console_echo=false;puts("OK ECHO OFF");return;}
   if(!strcmp(s,"STATUS")){
-    printf("OK STATUS ready=%u paired=%u connected=%u pairing=%u connecting=%u peer=%s key_parser=2 mode=%s\n",
-        ready,paired,connected,pairing,connecting,paired?bd_addr_to_str(peer):"-",keyboard_mode?"KEYBOARD":"COMMAND");return;
+    printf("OK STATUS ready=%u paired=%u connected=%u pairing=%u connecting=%u peer=%s key_parser=2 mode=%s cdc_rx=3 rx_bytes=%lu\n",
+        ready,paired,connected,pairing,connecting,paired?bd_addr_to_str(peer):"-",keyboard_mode?"KEYBOARD":"COMMAND",(unsigned long)rx_bytes);return;
   }
   if(!ready){puts("ERR NOT_READY");return;}
   if(!strcmp(s,"HELP")){
-    puts("OK HELP STATUS CONNECT MODE KEYBOARD KEY KEYH PAIR CANCEL DISCONNECT FORGET");
+    puts("OK HELP STATUS CONNECT MODE KEYBOARD KEY KEYH PAIR CANCEL DISCONNECT FORGET ECHO ON/OFF");
     puts("EVENT HELP KEYBOARD exit=Ctrl+] (ASCII 0x1D)");return;
   }
   if(!strcmp(s,"MODE KEYBOARD")){
@@ -188,25 +192,62 @@ static void command(char *s){
   }
   puts("ERR UNKNOWN_COMMAND");
 }
+static bool pin_prefix(void){
+  return line_len>=3&&line[0]=='P'&&line[1]=='I'&&line[2]=='N';
+}
+static void clear_line(void){
+  line_len=0;overflow=false;invalid_line=false;
+}
 static void serial_char(char c){
-  // Ctrl+] is a reserved escape in either mode, never a Bluetooth key.
-  if((uint8_t)c==0x1d){
+  uint8_t ch=(uint8_t)c;
+  ++rx_bytes;
+  // Ctrl+] is reserved in either mode, never sent over Bluetooth.
+  if(ch==0x1d){
     keyboard_mode=false;escape_state=0;raw_cr=false;
-    clear_raw_queue();line_len=0;overflow=false;
+    clear_raw_queue();clear_line();console_echo=true;
     puts("OK MODE COMMAND");return;
   }
-  if(keyboard_mode){raw_input((uint8_t)c);return;}
-  if(c=='\r'||c=='\n'){
-    if(overflow)puts("ERR LINE_TOO_LONG");
-    else if(line_len){line[line_len]=0;command(line);}
-    line_len=0;overflow=false;
-    if(keyboard_mode)raw_cr=c=='\r';
+  if(keyboard_mode){raw_input(ch);return;}
+  if(ch=='\r'||ch=='\n'){
+    if(overflow)puts("ERR LINE_TOO_LONG (max=99)");
+    else if(invalid_line)puts("ERR INVALID_LINE");
+    else if(line_len){
+      while(line_len&&line[line_len-1]==' ')--line_len;
+      line[line_len]=0;
+      if(line_len)command(line);
+    }
+    clear_line();
+    if(keyboard_mode)raw_cr=ch=='\r';
     return;
   }
-  if(c<32||c>126||line_len>=sizeof(line)-1){overflow=true;return;}
-  if(!overflow)line[line_len++]=c;
+  if(ch==0x15){clear_line();puts("EVENT RX LINE_CLEARED");return;}
+  if(ch==8||ch==127){
+    if(!overflow&&!invalid_line&&line_len)--line_len;
+    if(console_echo)puts("EVENT RX BACKSPACE");
+    return;
+  }
+  if(ch<32||ch>126){
+    if(!invalid_line)printf("EVENT RX INVALID_BYTE=0x%02X\n",(unsigned)ch);
+    invalid_line=true;return;
+  }
+  if(overflow||invalid_line)return;
+  if(ch==' '&&!line_len)return;
+  if(line_len>=sizeof(line)-1){overflow=true;return;}
+  // ASCII command names are case-insensitive. No PIN digits in diagnostics.
+  if(console_echo){
+    if(pin_prefix())puts("EVENT RX [MASKED]");
+    else printf("EVENT RX ASCII=0x%02X '%c'\n",(unsigned)ch,c);
+  }
+  line[line_len++]=(ch>='a'&&ch<='z')?(char)(ch-'a'+'A'):(char)ch;
 }
 static void tick(btstack_timer_source_t *t){
+  // Drain real CDC bytes without blocking the Bluetooth event loop.
+  // Do not cast a timeout (-1) into a serial character.
+  for(unsigned i=0;i<64;++i){
+    int ch=getchar_timeout_us(0);
+    if(ch<0)break;
+    serial_char((char)(uint8_t)ch);
+  }
   if(pairing&&expired(pair_end)){stop_pair();puts("EVENT PAIR_TIMEOUT");}
   if(connecting&&expired(connect_end)){
     connecting=false;if(pending_cid)hid_device_disconnect(pending_cid);
@@ -303,7 +344,6 @@ int main(void){
   sdp_register_service(service);
   hid_device_init(false,sizeof(descriptor),descriptor);
   hci_cb.callback=packet;hci_add_event_handler(&hci_cb);hid_device_register_packet_handler(packet);
-  btstack_stdin_setup(serial_char);
   btstack_run_loop_set_timer_handler(&timer,tick);
   btstack_run_loop_set_timer(&timer,20);btstack_run_loop_add_timer(&timer);
   hci_power_control(HCI_POWER_ON);btstack_run_loop_execute();return 0;
