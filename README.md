@@ -6,7 +6,7 @@
 
 ## Pico 2 W 藍牙鍵盤喚醒
 
-已新增獨立 Pico 2 W USB→Bluetooth Classic HID 鍵盤韌體與 Windows 控制工具 [pico2w_usb2bluetooth.py](pico2w_usb2bluetooth.py)。支援手動配對、指定按鍵喚醒與專用 GUI 輸入區。詳見 [編譯、燒錄、配對與使用說明](pico2w_usb2bluetooth/README.md)。實機刷新仍待驗證；不透過 Wi-Fi IP 發送藍牙按鍵。
+已新增獨立 Pico 2 W USB→Bluetooth Classic HID 鍵盤韌體與 Windows 控制工具 [pico2w_usb2bluetooth.py](pico2w_usb2bluetooth.py)。支援 CDC 直接鍵盤輸入、原樣回顯及自動藍牙配對／重連，不使用控制指令。詳見 [編譯、燒錄、配對與使用說明](pico2w_usb2bluetooth/README.md)。實機刷新仍待驗證；不透過 Wi-Fi IP 發送藍牙按鍵。
 
 ## 程式入口
 
@@ -182,6 +182,6 @@ Wi-Fi 配對及文件診斷保留於獨立工具；Watch Tool 的自動更新不
 1. 先結束舊版 Watch Tool，git pull 後執行 `python mooink_display_watcher.py`。
 2. 只連接一台 mooInk 的 USB 資料線；選擇正確尺寸、COM（選用），按「測試 USB／查詢 sleep」。
 3. 勾選「啟用 USB 自動更新 sleep 圖片」並儲存。第一次上傳後，在 mooInk 選取 `mooink_display_10.png` 或 `mooink_display_13.png` 作為自訂休眠圖，而非閱讀中書本封面；設定 15 秒自動休眠。
-4. Word 更新時轉換 PNG，WPD 直接比對 sleep 同名圖片。若不同，先回讀舊圖並備份至 `%LOCALAPPDATA%/mooink/watcher_backup`，確認刪除後上傳新圖，再回讀 SHA-256。只有驗證成功才發 Pico F12。其他圖片不刪除；若上傳失敗保留備份且不發 F12。
+4. Word 更新時轉換 PNG，WPD 直接比對 sleep 同名圖片。若不同，先回讀舊圖並備份至 `%LOCALAPPDATA%/mooink/watcher_backup`，確認刪除後上傳新圖，再回讀 SHA-256。只有驗證成功才發 Pico Space。其他圖片不刪除；若上傳失敗保留備份且不發 Space。
 5. 相同內容不重複寫入；每次檢查實際連接的閱讀器。可從系統匣「立即重新轉圖／傳送」強制檢查並測試喚醒。若韌體因刪除重建物件而忘記選取的休眠圖，需實機確認是否重新選取。
 6. 舊 Wi-Fi PDF 自動更新設定不再使用；以前產生的 PDF 不會被程式刪除。Wi-Fi 配對憑證保留。

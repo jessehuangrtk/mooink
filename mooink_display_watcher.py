@@ -189,12 +189,11 @@ def pico_wake(port, log):
     if not port:
         return "未設定 Pico，略過 Space"
     try:
-        from pico2w_usb2bluetooth import PicoKeyboard, ports
+        from pico2w_usb2bluetooth import send_text, ports
         if not any(p.device.casefold() == port.casefold() for p in ports()):
             return "找不到 " + port + "，略過 Space"
-        with PicoKeyboard(port, event=log) as kb:
-            kb.raw_key(" ")
-        return "Space 已送出；電子紙是否喚醒尚待觀察"
+        send_text(port, " ")
+        return "Space 已寫入 CDC；藍牙傳送與實際喚醒尚待確認"
     except Exception as exc:
         return "Pico 喚醒略過：" + str(exc)
 
