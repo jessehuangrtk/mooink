@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
+set "PYTHONIOENCODING=utf-8"
 pushd "%~dp0" || exit /b 1
 if not exist ".venv\Scripts\python.exe" (
   echo Run install.bat first.

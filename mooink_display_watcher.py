@@ -17,7 +17,7 @@ import re
 import shutil
 import tempfile
 import threading
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 import uuid
 
 from mook_sleep_screen_manager import SleepScreenManager, RESOLUTIONS
@@ -495,13 +495,17 @@ def main():
                     initialized.add(directory)
                 with operation_lock:
                     if current.enable_usb:
+                        # Always keep the local Word->PNG feature running even
+                        # while all USB readers are disconnected/unpaired.
+                        local_result = processor.check(replace(current, enable_usb=False),
+                            force, publish, scheduled=scheduled)
                         results = multiple.check(
                             current, force=force, scheduled=scheduled, device_events=paths,
                             log=publish,
                             inventory=lambda rows: events.put(("inventory", rows)),
                             status=lambda rid, msg: events.put(("device_status", (rid, msg))),
                             success=lambda rid, data: events.put(("device_success", (rid, data))))
-                        result = results[-1] if results else "裝置掃描完成（未配對或無裝置）"
+                        result = results[-1] if results else (local_result or "裝置掃描完成（未配對或無裝置）")
                     else:
                         result = processor.check(current, force, publish,
                             scheduled=scheduled)

@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
+set "PYTHONIOENCODING=utf-8"
 pushd "%~dp0" || exit /b 1
 python -c "import sys; assert sys.platform=='win32' and sys.version_info >= (3,10), 'Windows Python 3.10+ required'" || goto failed
 if exist "wheelhouse\" (

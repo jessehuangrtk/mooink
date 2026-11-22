@@ -5,6 +5,7 @@ import unittest
 from types import SimpleNamespace
 
 from mooink_multi_device import DeviceRegistry, MultiDeviceController
+from mooink_display_watcher import Settings
 
 
 class DeviceProfilesTest(unittest.TestCase):
@@ -37,7 +38,7 @@ class DeviceProfilesTest(unittest.TestCase):
             manager = MultiDeviceController(reg, lambda rid: FakeProcessor(),
                                             lambda: readers, lambda event,pnp:False)
             statuses = {}
-            manager.check(SimpleNamespace(size="13.3",pico_port="COM6"),
+            manager.check(Settings(watch_dir=tmp, enable_usb=True, size="13.3", pico_port="COM6"),
                           status=lambda k,m: statuses.__setitem__(k,m))
             self.assertEqual(calls, [("10.3","")])
             self.assertIn("尚未配對", statuses["b"*64])
@@ -57,13 +58,13 @@ class DeviceProfilesTest(unittest.TestCase):
                     return "verified"
             manager = MultiDeviceController(reg, lambda rid: FakeProcessor(rid),
                                             lambda: rows, lambda event,pnp:False)
-            manager.check(SimpleNamespace(size="10.3",pico_port="COM6"))
+            manager.check(Settings(watch_dir=tmp, enable_usb=True, size="10.3", pico_port="COM6"))
             self.assertEqual(calls, [(ids[0],"10.3",""),(ids[1],"13.3","")])
             rows.pop()
-            manager.check(SimpleNamespace(size="10.3",pico_port="COM6"))
+            manager.check(Settings(watch_dir=tmp, enable_usb=True, size="10.3", pico_port="COM6"))
             self.assertNotIn(ids[1],manager.processors)
             rows.append({"id":ids[1], "name":"mooInk","ready":True,"pnp":ids[1]})
-            manager.check(SimpleNamespace(size="10.3",pico_port="COM6"))
+            manager.check(Settings(watch_dir=tmp, enable_usb=True, size="10.3", pico_port="COM6"))
             self.assertEqual(calls[-1], (ids[1],"13.3",""))
 
     def test_verified_metadata_persists(self):

@@ -520,7 +520,9 @@ def list_readers(*, device_source=None):
             try:
                 _sleep_directory(dev)
                 ready = True
-            except (OSError, RuntimeError, ValueError):
+            except Exception:
+                # WPD COM errors are not guaranteed to subclass OSError.
+                # A not-yet-mounted reader must not hide other devices.
                 ready = False
             output.append({"id": key, "name": _device_name(dev), "ready": ready,
                            "pnp": str(getattr(dev, "_p_id", "") or "")})
