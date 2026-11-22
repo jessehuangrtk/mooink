@@ -31,5 +31,16 @@ int main(void){
     const uint8_t error[]={12,0,0,0,3,0,2,32,3,0,0,0};
     mtp_stream_init(&s,MTP_GET_OBJECT,3,true,3,sink,&b);
     assert(mtp_stream_feed(&s,error,sizeof(error))&&s.done&&s.response==0x2002);
+    const uint8_t params[]={24,0,0,0,3,0,1,32,3,0,0,0,1,0,0,0,2,0,0,0,0x78,0x56,0x34,0x12};
+    for(size_t cut=0;cut<=sizeof params;cut++){
+        mtp_stream_init(&s,MTP_OPEN,3,false,0,NULL,NULL);
+        assert(mtp_stream_feed(&s,params,cut));
+        assert(mtp_stream_feed(&s,params+cut,sizeof params-cut));
+        assert(s.done&&s.response_count==3&&s.response_params[0]==1&&
+               s.response_params[1]==2&&s.response_params[2]==0x12345678);
+    }
+    uint8_t malformed[24];memcpy(malformed,params,sizeof malformed);malformed[0]=23;
+    mtp_stream_init(&s,MTP_OPEN,3,false,0,NULL,NULL);
+    assert(!mtp_stream_feed(&s,malformed,sizeof malformed));
     return 0;
 }

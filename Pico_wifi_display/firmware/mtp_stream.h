@@ -3,7 +3,10 @@
 #include "mtp_codec.h"
 typedef bool (*mtp_sink)(const uint8_t *,size_t,void *);
 typedef struct {
-    uint8_t header[12];
+    uint8_t header[12],response_bytes[20];
+    size_t response_n;
+    uint32_t response_params[5];
+    size_t response_count;
     size_t header_n;
     uint32_t remaining, total, limit, tid;
     uint16_t op, response;

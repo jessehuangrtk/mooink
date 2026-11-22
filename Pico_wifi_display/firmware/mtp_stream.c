@@ -11,9 +11,17 @@ bool mtp_stream_feed(mtp_stream *s,const uint8_t *p,size_t n){
         if(s->in_data||s->in_response){
             size_t take=n<s->remaining?n:s->remaining;
             if(s->in_data&&take&&(!s->sink||!s->sink(p,take,s->ctx)))return bad(s);
+            if(s->in_response){
+                if(take>sizeof(s->response_bytes)-s->response_n)return bad(s);
+                memcpy(s->response_bytes+s->response_n,p,take);s->response_n+=take;
+            }
             p+=take;n-=take;s->remaining-=(uint32_t)take;
             if(!s->remaining){
-                if(s->in_response)s->done=true;
+                if(s->in_response){
+                    s->response_count=s->response_n/4;
+                    for(size_t i=0;i<s->response_count;i++)s->response_params[i]=mtp_u32(s->response_bytes+4*i);
+                    s->done=true;
+                }
                 s->in_data=s->in_response=false;
             }
             continue;

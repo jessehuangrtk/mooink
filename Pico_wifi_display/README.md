@@ -80,3 +80,7 @@ UF2：`build/smb/pico_wifi_display_smb_probe.uf2`。私有設定編譯入 UF2（
 Pico 每輪 SMB 檢查完成（包括來源讀取失敗但 SMB 已連線）會把最近 RAM 紀錄快照寫到與 mooink_display.png 同一 share 的 `pico_log.txt`，單一 Pico 使用專屬 share 或專屬帳號。**圖片維持唯讀**；SMB 帳號須有讀取 PNG 及建立／更新 pico_log.txt 的權限。建議預先建立普通單一連結的 pico_log.txt 並僅授與該檔寫入權，避免對圖片或整個分享開放修改。不使用符號連結、junction 或 hardlink。Windows 現有 SMB signing/encryption 不變。關閉 Debug Mode 時完全不碰 log 檔。
 
 內容：開機與 uptime 毫秒、序號、Wi-Fi 連線、SMB 認證／來源錯誤階段、CHANGED/UNCHANGED、bytes/hash、RAM/stack。密碼、SSID、帳號、原始 libsmb2 錯誤文字不記錄。16 KiB 循環 RAM 加少量檔頭；超限丟最舊整行，檔頭顯示丟棄數。每次覆寫最近快照，不無限追加；重啟失去上一次 RAM 紀錄，若需要長期留存可從 Windows 複製快照。網路/SMB 不通時保留有限 RAM，恢復認證後再更新。若寫入中途斷線，遠端快照可能不完整，下輪改寫；不會刪除圖片。不因 log 寫入失敗更改圖片觀測結果。實際 MTP/BT 日誌待三介面整合才接入；本次仍是 SMB probe。尚待交叉編譯與實機驗收。
+
+### Code review: MTP 嚴格唯讀驗證
+
+新增 GetDeviceInfo operation/format/event 摘要及 GetStorageInfo 容量／存取模式；目標名稱以 UTF-16 code unit 比對，不使用 console 的有損顯示。拒絕重複/非法 handle、大小寫衝突、非預期 storage/parent、非 PNG/undefined 檔案物件、保護中的目標。GetObject 完整 hash 成功才印 READ-ONLY PROBE COMPLETE，檔案不存在不視為完整驗證。MTP codec 仍禁止任何寫入／刪除指令。USB transaction 有 5 秒無進度／120 秒總逾時；出錯仍需拔插恢復。本批次的交叉編譯與實機驗收尚未執行。

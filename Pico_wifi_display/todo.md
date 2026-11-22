@@ -188,3 +188,7 @@
 - [ ] R098 [P0] 使用獨立 Pico 與備份後的實機測試：先乾跑/唯讀枚舉與回讀 hash，再用專用測試圖寫入，最後才允許一次 Space；禁止影響舊 Watch Tool。
 - [ ] R099 [P1] 長時間 soak test 至少 24/72 小時、SMB/Wi-Fi 斷線、USB 拔插、BT 斷線、休眠/重啟及異常斷電；確認無 RAM leak、log 爆長、意外翻頁。
 - [ ] R100 [P1] 交付前以 Git diff 檢查所有變更均在指定目錄，確認舊應用 unchanged；README 附實際測試結果、未通過項目、版本及完整獨立操作步驟。
+
+### R021–R028 第一批施工紀錄
+
+已新增精確唯讀 opcode/參數限制、DeviceInfo/StorageInfo/ObjectInfo 解析、無損目標識別、重複 handle 拒絕、response parameters、錯誤代碼與交易逾時。R020、R021–R028 已有程式修正及新的單元測試，尚待執行；R023 的實際寫入前容量 gate、R028 的 session 自動復原仍未完成，故保留勾選待驗收。
