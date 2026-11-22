@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from types import FunctionType
 import uuid
+from urllib.parse import quote_plus
 
 from mooink_full_cmd_demo import (
     require_private_ipv4, http_get_metadata, fingerprint, make_client,
@@ -17,6 +18,11 @@ from mooink_full_cmd_demo import (
 
 class WifiPairingError(RuntimeError):
     pass
+
+class WifiHttpError(WifiPairingError):
+    def __init__(self, status_code):
+        self.status_code = status_code
+        super().__init__("mooInk API HTTP %d；請檢查配對或裝置狀態。" % status_code)
 
 class PairingCancelled(WifiPairingError):
     pass
@@ -44,7 +50,7 @@ def new_client(ip, timeout=8):
         kwargs.setdefault("timeout", timeout)
         response = original(request, **kwargs)
         if not 200 <= response.status_code < 300:
-            raise WifiPairingError("mooInk API HTTP %d；請檢查配對或裝置狀態。" % response.status_code)
+            raise WifiHttpError(response.status_code)
         return response
     client.session.send = send
     return client
@@ -159,6 +165,32 @@ def connect_saved(ip, timeout=8):
         raise
     return client, device
 
+def resolve_folder_paths(client, control="Document"):
+    """Probe only known resolver GET routes. Never create folders or files."""
+    rows = []
+    for path in dict.fromkeys((control, "sleep", "/sleep", "Document/sleep")):
+        row = {"path": path, "control": path == control, "http": None,
+               "type": None, "resolved_path": None}
+        try:
+            response = client._get_endpoint("/resolve/entry/path/" + quote_plus(path))
+            row["http"] = response.status_code
+            if response.status_code == 200:
+                obj = response.json()
+                if isinstance(obj, dict):
+                    kind = obj.get("entry_type")
+                    row["type"] = kind if kind in ("folder", "document") else None
+                    resolved = obj.get("entry_path")
+                    if isinstance(resolved, str):
+                        row["resolved_path"] = resolved
+                    row["has_id"] = bool(obj.get("entry_id"))
+        except WifiHttpError as exc:
+            row["http"] = exc.status_code
+        except Exception as exc:
+            row["error"] = type(exc).__name__
+        rows.append(row)
+    return rows
+
+
 def inspect_folders(ip, timeout=8):
     """Only authenticated GET requests; no create/upload/delete operations."""
     client, device = connect_saved(ip, timeout)
@@ -173,7 +205,11 @@ def inspect_folders(ip, timeout=8):
                           and isinstance(row.get("entry_path"), str)})
         complete = data.get("count") == len(entries)
         sleep = [path for path in folders if path.rstrip("/").split("/")[-1].casefold() == "sleep"]
-        return {"device": device, "folders": folders, "complete": complete, "sleep": sleep}
+        control = next((path for path in folders if path.startswith("Document/") and
+                        path.rstrip("/").split("/")[-1].casefold() != "sleep"), "Document")
+        probes = resolve_folder_paths(client, control)
+        return {"device": device, "folders": folders, "complete": complete,
+                "sleep": sleep, "probes": probes}
     finally:
         client.session.close()
 

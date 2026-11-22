@@ -452,7 +452,31 @@ def main():
                     listing.configure(yscrollcommand=scroll.set)
                     scroll.pack(side="right",fill="y")
                     listing.pack(side="left",fill="both",expand=True)
-                    listing.insert("1.0","\n".join(folders) or "（沒有資料夾）")
+                    lines = ["=== API 資料夾清單 ===", *folders,
+                             "", "=== 直接路徑解析（唯讀 GET） ==="]
+                    for probe in result["probes"]:
+                        status = ("HTTP " + str(probe["http"]) if probe["http"] is not None
+                                  else "連線／解析失敗")
+                        detail = probe.get("type") or ""
+                        if probe.get("resolved_path"):
+                            detail += " → " + probe["resolved_path"]
+                        if probe.get("error"):
+                            detail += " [" + probe["error"] + "]"
+                        if probe["control"]:
+                            detail += "（已知文件路徑對照）"
+                        lines.append("%s : %s %s" % (probe["path"], status, detail))
+                    lines += ["", "HTTP 200 且回傳 folder 資訊才表示路徑可解析。",
+                              "Document/sleep 不等於 USB MTP 的 sleep。",
+                              "尚未驗證 PNG 寫入；本操作沒有上傳或建立目錄。"]
+                    listing.insert("1.0","\n".join(lines))
+                    def copy_results():
+                        dialog.clipboard_clear()
+                        dialog.clipboard_append("\n".join(lines))
+                        dialog.update_idletasks()
+                    ttk.Button(dialog,text="複製完整結果",command=copy_results).pack(pady=(0,8))
+                    for probe in result["probes"]:
+                        logger.info("Wi-Fi resolver %s: HTTP %s, type=%s, error=%s",
+                                    probe["path"],probe["http"],probe["type"],probe.get("error"))
                     listing.configure(state="disabled")
                     logger.info("Wi-Fi API %s: 資料夾 %d 個, sleep 列出 %s, 清單完整 %s",
                                 ip,len(folders),bool(sleep),result["complete"])

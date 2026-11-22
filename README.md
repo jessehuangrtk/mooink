@@ -169,7 +169,7 @@ py mooink_full_cmd_demo.py --ip 192.168.1.137
 - **Wi-Fi 配對**：請先保持 mooInk 喚醒；明確同意後啟動配對，於 GUI 輸入裝置顯示的 PIN，不需命令列。
 - **匯入既有憑證**：選擇先前 CLI 配對產生的 deviceid.dat 和 privatekey.dat 所在的同一個資料夾；認證成功才加密匯入。
 - **測試連線**：使用目前 IP 回傳的裝置識別碼查找本機 DPAPI 憑證，驗證 API。
-- **查詢資料夾**：唯讀列出 API 回報的資料夾，特別標示 sleep 是否存在及清單是否完整。沒有列出不等於證明不存在。
+- **查詢資料夾**：唯讀列出 API 回報的資料夾，並直接以路徑解析 GET 查詢 `sleep`、`/sleep`、`Document/sleep`，對照已知文件路徑、顯示 HTTP 狀態及物件類型，可複製完整結果。沒有列出不等於證明不存在；即使解析成功也不代表可寫入 USB MTP 的 sleep。
 
 憑證依閱讀器的動態識別碼保存在 %LOCALAPPDATA%\mooink_interactive_lab\auth，與 mooink_full_cmd_demo.py 共用，不依 IP 單獨存取、不寫入 Git 或一般 JSON 設定檔。IP 改變或更換裝置時，會重新確認裝置身分；其他裝置的憑證不會被覆寫。PIN、私鑰及配對回應不記錄至 log。
 

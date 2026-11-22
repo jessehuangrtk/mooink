@@ -113,3 +113,32 @@ class PairingTests(unittest.TestCase):
             result = wifi.inspect_folders("192.168.1.140")
         self.assertFalse(result["complete"])
         self.assertEqual(result["sleep"],[])
+
+
+    def test_direct_path_probe_status_and_control(self):
+        client = FakeClient()
+        calls = []
+        def get(route):
+            calls.append(route)
+            if route.endswith("Document%2FSamples"):
+                return SimpleNamespace(status_code=200, json=lambda: {
+                    "entry_type":"folder", "entry_path":"Document/Samples", "entry_id":"control"})
+            if route.endswith("Document%2Fsleep"):
+                return SimpleNamespace(status_code=200, json=lambda: {
+                    "entry_type":"folder", "entry_path":"Document/sleep", "entry_id":"other"})
+            raise wifi.WifiHttpError(404)
+        client._get_endpoint = get
+        rows = wifi.resolve_folder_paths(client, "Document/Samples")
+        self.assertEqual([r["http"] for r in rows], [200,404,404,200])
+        self.assertTrue(rows[0]["control"])
+        self.assertEqual(rows[-1]["resolved_path"], "Document/sleep")
+        self.assertEqual(calls, ["/resolve/entry/path/Document%2FSamples",
+                                 "/resolve/entry/path/sleep", "/resolve/entry/path/%2Fsleep",
+                                 "/resolve/entry/path/Document%2Fsleep"])
+        client.session.close.assert_not_called()
+
+    def test_probe_unexpected_response_is_not_folder(self):
+        client = FakeClient()
+        client._get_endpoint = Mock(return_value=SimpleNamespace(
+            status_code=200, json=lambda: {"message":"unexpected"}))
+        self.assertTrue(all(row["type"] is None for row in wifi.resolve_folder_paths(client)))
