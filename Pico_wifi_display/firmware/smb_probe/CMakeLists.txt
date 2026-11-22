@@ -19,7 +19,7 @@ target_compile_definitions(libsmb2 PRIVATE HAVE_CONFIG_H PICO_PLATFORM=1 NO_SYS=
 target_include_directories(libsmb2 BEFORE PRIVATE "${CMAKE_CURRENT_LIST_DIR}" "${LIBSMB2_PATH}/include/picow")
 # Upstream Pico W port expects lwIP socket headers, FreeRTOS and SDK config.
 target_link_libraries(libsmb2 PRIVATE pico_cyw43_arch_lwip_sys_freertos FreeRTOS-Kernel)
-add_executable(pico_wifi_display_smb_probe ../smb_main.c ../smb_snapshot.c)
+add_executable(pico_wifi_display_smb_probe ../smb_main.c ../smb_snapshot.c ../debug_log.c)
 target_include_directories(pico_wifi_display_smb_probe PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}" "${CMAKE_CURRENT_LIST_DIR}/.." "${LIBSMB2_PATH}/include" "${LIBSMB2_PATH}/include/picow")
 target_compile_definitions(pico_wifi_display_smb_probe PRIVATE PICO_PLATFORM=1 NO_SYS=0)

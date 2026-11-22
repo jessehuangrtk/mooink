@@ -25,3 +25,10 @@ class ConfigTests(unittest.TestCase):
     def test_invalid_interval(self):
         self.config["poll_seconds"]=True
         with self.assertRaises(ValueError):generate(self.config)
+
+    def test_debug_mode(self):
+        self.assertIn("#define DISPLAY_DEBUG_MODE 0",generate(self.config))
+        self.config["debug_mode"]=True
+        self.assertIn("#define DISPLAY_DEBUG_MODE 1",generate(self.config))
+        self.config["debug_mode"]="true"
+        with self.assertRaises(ValueError):generate(self.config)

@@ -10,6 +10,7 @@ typedef struct {
     char bt_peer[18];
     unsigned poll_seconds;
     unsigned display_size; /* 10 or 13 */
+    bool debug_mode;
 } display_settings;
 
 typedef void (*menu_write)(void *, const char *);

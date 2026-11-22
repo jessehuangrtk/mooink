@@ -26,6 +26,9 @@ def generate(config):
         raise ValueError("SMB signing must be required")
     if smb.get("file") != "mooink_display.png":
         raise ValueError("Only mooink_display.png is supported")
+    debug = config.get("debug_mode",False)
+    if type(debug) is not bool:
+        raise ValueError("debug_mode: true or false")
     interval = config.get("poll_seconds")
     if type(interval) is not int or not 5 <= interval <= 86400:
         raise ValueError("poll_seconds: 5..86400")
@@ -50,6 +53,7 @@ def generate(config):
     lines += ["#define DISPLAY_POLL_SECONDS %du" % interval,
               "#define DISPLAY_WIDTH %du" % width,
               "#define DISPLAY_HEIGHT %du" % height,
+              "#define DISPLAY_DEBUG_MODE %d" % int(debug),
               "#define DISPLAY_REQUIRE_SEAL %d" % int(smb.get("require_encryption") is True)]
     return "\n".join(lines)+"\n"
 

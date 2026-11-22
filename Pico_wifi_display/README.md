@@ -72,3 +72,11 @@ bash build_smb_wsl.sh
 ~~~
 
 UF2：`build/smb/pico_wifi_display_smb_probe.uf2`。私有設定編譯入 UF2（明文可擷取），不要分享 UF2、ELF 或 config.local.*；全部在本目錄 gitignore 範圍內。此探測版不使用 menu 的 RAM 設定，也不更新 mooInk。透過原生 CDC 或 UART 看 log：Wi-Fi connected、SMB CHANGED/UNCHANGED、bytes、SHA256、FreeRTOS heap/stack watermark。比對 Windows Get-FileHash。以 4096 bytes 分塊讀取，限制 16 MiB，兩次 stat 及開檔前後 fstat/stat 必須一致，檢查 PNG header 尺寸及 8-bit grayscale（不是完整 PNG 解碼驗證）。每次都 hash，避免單靠 mtime。任何失敗不會碰 USB。libsmb2 與 RP2350 FreeRTOS 使用固定 commit；交叉編譯、Windows signing/NTLMv2 相容性、RAM 與共存仍未驗證。請勿為了測試降低 Windows 安全政策。
+
+## Debug Mode：SMB pico_log.txt
+
+在 config.local.json 最外層設定 `"debug_mode": true`（預設 false），重新執行 build_smb_wsl.sh 並燒錄 SMB probe。CDC menu preview 的 Display → Debug mode ON/OFF 只是 RAM 草稿，尚未與 SMB probe 合併；不會即時改變已燒錄的 SMB probe。
+
+Pico 每輪 SMB 檢查完成（包括來源讀取失敗但 SMB 已連線）會把最近 RAM 紀錄快照寫到與 mooink_display.png 同一 share 的 `pico_log.txt`，單一 Pico 使用專屬 share 或專屬帳號。**圖片維持唯讀**；SMB 帳號須有讀取 PNG 及建立／更新 pico_log.txt 的權限。建議預先建立普通單一連結的 pico_log.txt 並僅授與該檔寫入權，避免對圖片或整個分享開放修改。不使用符號連結、junction 或 hardlink。Windows 現有 SMB signing/encryption 不變。關閉 Debug Mode 時完全不碰 log 檔。
+
+內容：開機與 uptime 毫秒、序號、Wi-Fi 連線、SMB 認證／來源錯誤階段、CHANGED/UNCHANGED、bytes/hash、RAM/stack。密碼、SSID、帳號、原始 libsmb2 錯誤文字不記錄。16 KiB 循環 RAM 加少量檔頭；超限丟最舊整行，檔頭顯示丟棄數。每次覆寫最近快照，不無限追加；重啟失去上一次 RAM 紀錄，若需要長期留存可從 Windows 複製快照。網路/SMB 不通時保留有限 RAM，恢復認證後再更新。若寫入中途斷線，遠端快照可能不完整，下輪改寫；不會刪除圖片。不因 log 寫入失敗更改圖片觀測結果。實際 MTP/BT 日誌待三介面整合才接入；本次仍是 SMB probe。尚待交叉編譯與實機驗收。

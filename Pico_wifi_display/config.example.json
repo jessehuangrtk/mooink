@@ -23,5 +23,6 @@
   "bluetooth": {
     "key": "space",
     "peer": ""
-  }
+  },
+  "debug_mode": false
 }

@@ -28,7 +28,7 @@ static void show(display_menu *m){
     case BLUETOOTH:
         say(m,"\n[Bluetooth Classic]\n1. Target MAC address\n2. Pair / reconnect (not implemented)\n0. Back\nSelect: ");break;
     case GENERAL:
-        say(m,"\n[Display]\n1. Size (10.3 / 13.3)\n2. Poll interval (5-86400 seconds)\n0. Back\nSelect: ");break;
+        say(m,"\n[Display]\n1. Size (10.3 / 13.3)\n2. Poll interval (5-86400 seconds)\n3. Debug mode (ON/OFF)\n0. Back\nSelect: ");break;
     }
 }
 static void status(display_menu *m){
@@ -36,11 +36,11 @@ static void status(display_menu *m){
     snprintf(s,sizeof(s),"\nWi-Fi SSID: %s\nWi-Fi password: %s\n"
              "SMB server: %s\nSMB share: %s\nSMB username: %s\nSMB password: %s\n"
              "SMB signing: required\nSource: mooink_display.png\nBluetooth peer: %s\n"
-             "Display: %s\nPoll: %u s\n"
+             "Display: %s\nPoll: %u s\nDebug mode: %s\n"
              "Settings are RAM preview only; Wi-Fi/SMB/BT not connected in this build.\n",
              d->ssid,d->wifi_password[0]?"[set]":"[not set]",
              d->smb_server,d->smb_share,d->smb_user,d->smb_password[0]?"[set]":"[not set]",
-             d->bt_peer[0]?d->bt_peer:"[not set]",d->display_size==13?"13.3":"10.3",d->poll_seconds);
+             d->bt_peer[0]?d->bt_peer:"[not set]",d->display_size==13?"13.3":"10.3",d->poll_seconds,d->debug_mode?"ON":"OFF");
     say(m,s);
 }
 static bool text_field(char *dst,size_t cap,const char *value,bool empty_ok){
@@ -82,6 +82,10 @@ static void set_value(display_menu *m){
     else if(m->page==GENERAL){
         if(m->field==1){if(!strcmp(s,"10.3")){d->display_size=10;ok=true;}else if(!strcmp(s,"13.3")){d->display_size=13;ok=true;}}
         else if(m->field==2)ok=interval(&d->poll_seconds,s);
+        else if(m->field==3){
+            if(!strcmp(s,"ON")||!strcmp(s,"on")||!strcmp(s,"1")){d->debug_mode=true;ok=true;}
+            else if(!strcmp(s,"OFF")||!strcmp(s,"off")||!strcmp(s,"0")){d->debug_mode=false;ok=true;}
+        }
     }
     if(password)clear_input(m);
     say(m,ok?"\nUpdated in RAM.\n":"\nInvalid value. Previous setting retained.\n");
@@ -107,7 +111,7 @@ static void submit(display_menu *m){
         return;
     }
     if(m->page==BLUETOOTH&&n==2){say(m,"\nBluetooth transport not implemented in menu preview.\n");show(m);return;}
-    unsigned max=m->page==SMB?4:m->page==BLUETOOTH?1:2;
+    unsigned max=m->page==SMB?4:m->page==BLUETOOTH?1:m->page==GENERAL?3:2;
     if(n>max){say(m,"\nInvalid choice.\n");show(m);return;}
     m->field=n;
     const char *prompt="New value (Enter to submit): ";

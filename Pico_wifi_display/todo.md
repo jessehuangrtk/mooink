@@ -29,6 +29,14 @@
 - [ ] 整合 SMB 與 USB Host，測量 RAM、逾時及網路斷線。
 - [ ] Windows 端獨立設定與診斷工具（不常駐推送）。
 
+## P1.5 — SMB Debug Mode
+- [x] debug_mode 開關，預設 OFF；私有 JSON 設定及 CDC menu RAM 預覽。
+- [x] 16 KiB RAM 循環紀錄，uptime、序號、遺失計數、Wi-Fi/SMB/圖片 hash/heap。
+- [x] SMB 已連線時將最近紀錄回寫固定 pico_log.txt，失敗保留 RAM 並下次重試；來源 PNG 仍唯讀。
+- [x] 主機測試：開關、容量上限、控制字元、設定類型與選單。
+- [ ] 交叉編譯 / Windows 寫入權限 / 斷線恢復實機驗收。
+- [ ] 整合 MTP/BT 真實事件；CDC 設定持久化及運行中 Apply。
+
 ## P2 — 安全更新
 - [ ] 唯一目標 USB／sleep／保留檔名、重名及不明物件拒絕。
 - [ ] 舊圖完整備份及回讀 hash，保留可恢復版本。

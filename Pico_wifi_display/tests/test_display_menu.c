@@ -20,7 +20,10 @@ int main(void){
     feed(&m,"3\r1\rAA:BB:CC:DD:EE:FF\r0\r4\r1\r13.3\r2\r120\r2\r0\r");
     assert(!strcmp(m.draft.bt_peer,"AA:BB:CC:DD:EE:FF")&&m.draft.display_size==13&&m.draft.poll_seconds==120);
     /* Invalid interval retained; leave value field then general menu. */
+    feed(&m,"3\rON\r");assert(m.draft.debug_mode);
+    feed(&m,"3\rOFF\r");assert(!m.draft.debug_mode);
     feed(&m,"0\r5\r");assert(strstr(l.data,"[set]")&&!strstr(l.data,"hiddenpass"));
+    assert(strstr(l.data,"Debug mode: OFF"));
     feed(&m,"0\r");assert(!m.active);
     return 0;
 }
