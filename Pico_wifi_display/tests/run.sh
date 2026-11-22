@@ -13,4 +13,6 @@ cc -std=c11 -Wall -Wextra -Werror -Ifirmware tests/test_smb_snapshot.c firmware/
 "$tmp/test_snapshot"
 cc -std=c11 -Wall -Wextra -Werror -Ifirmware tests/test_debug_log.c firmware/debug_log.c -o "$tmp/test_log"
 "$tmp/test_log"
+cc -std=c11 -Wall -Wextra -Werror -Ifirmware tests/test_display_update.c firmware/display_update.c -o "$tmp/test_update"
+"$tmp/test_update"
 python3 -m unittest discover -s tests -p 'test_*.py' -v

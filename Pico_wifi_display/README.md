@@ -84,3 +84,7 @@ Pico 每輪 SMB 檢查完成（包括來源讀取失敗但 SMB 已連線）會�
 ### Code review: MTP 嚴格唯讀驗證
 
 新增 GetDeviceInfo operation/format/event 摘要及 GetStorageInfo 容量／存取模式；目標名稱以 UTF-16 code unit 比對，不使用 console 的有損顯示。拒絕重複/非法 handle、大小寫衝突、非預期 storage/parent、非 PNG/undefined 檔案物件、保護中的目標。GetObject 完整 hash 成功才印 READ-ONLY PROBE COMPLETE，檔案不存在不視為完整驗證。MTP codec 仍禁止任何寫入／刪除指令。USB transaction 有 5 秒無進度／120 秒總逾時；出錯仍需拔插恢復。本批次的交叉編譯與實機驗收尚未執行。
+
+## 安全更新流程（協調器，尚未接入硬體）
+
+`firmware/display_update.c` 提供 dry-run、目標身分／容量／備份驗證、journal gate、回讀驗證及單次 Bluetooth 喚醒的狀態機。`tests/test_display_update.c` 模擬逐步失敗及 USB 重連。詳見 [adapter 合約](docs/update_adapter.md)。尚未連接真實 MTP write、SMB backup、持久 journal 或 Bluetooth；現有 probe 仍禁止刪除和上傳，不應視作整合韌體。

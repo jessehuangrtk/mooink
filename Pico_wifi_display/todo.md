@@ -192,3 +192,8 @@
 ### R021–R028 第一批施工紀錄
 
 已新增精確唯讀 opcode/參數限制、DeviceInfo/StorageInfo/ObjectInfo 解析、無損目標識別、重複 handle 拒絕、response parameters、錯誤代碼與交易逾時。R020、R021–R028 已有程式修正及新的單元測試，尚待執行；R023 的實際寫入前容量 gate、R028 的 session 自動復原仍未完成，故保留勾選待驗收。
+
+### R031–R039 第二批施工紀錄
+
+- R031、R032、R036、R038、R039、R066、R069、R095：已建立獨立 display_update 協調器、dry-run/容量/備份/目標身分 gate、持久 journal callback、回讀比對及一次性 wake gate；新增逐步失敗注入測試。仍待實際 backend、journal 耐久層、實機及測試執行，不勾選為全部完成。
+- R033–R035、R037：stage/backup/mutator 合約已定義；尚未接入實際 SMB 封存、MTP data-out 或 rename，保持唯讀。
