@@ -161,3 +161,17 @@ py mooink_full_cmd_demo.py --ip 192.168.1.137
 
 **Wi-Fi 限制：** 尚未證實第一代 mooInk 原生 Sony API 能把 PNG 寫入 sleep。程式只接受明確設定、實際可存取的同 IP UNC sleep 共享資料夾；不猜測 SMB 分享名稱，不會用 dptrp1 上傳 PNG 冒充 sleep 圖更新。未設定共享時只輸出本機 PNG，不送出 F12。若有真實共享，僅更新本程式的同名 PNG，暫存與回讀 SHA-256 驗證成功後才呼叫 Pico F12；Pico 不存在或未設定時略過。未確認實機能經此方式顯示該 PNG。裝置須已選取適當休眠圖並設好 15 秒自動休眠。
 
+
+
+### 常駐程式 Wi-Fi 配對介面
+
+更新後執行 python -m pip install -r requirements.txt。系統匣右鍵「設定／Wi-Fi 配對」，輸入目標 IP（預設 192.168.1.140）：
+- **Wi-Fi 配對**：請先保持 mooInk 喚醒；明確同意後啟動配對，於 GUI 輸入裝置顯示的 PIN，不需命令列。
+- **匯入既有憑證**：選擇先前 CLI 配對產生的 deviceid.dat 和 privatekey.dat 所在的同一個資料夾；認證成功才加密匯入。
+- **測試連線**：使用目前 IP 回傳的裝置識別碼查找本機 DPAPI 憑證，驗證 API。
+- **查詢資料夾**：唯讀列出 API 回報的資料夾，特別標示 sleep 是否存在及清單是否完整。沒有列出不等於證明不存在。
+
+憑證依閱讀器的動態識別碼保存在 %LOCALAPPDATA%\mooink_interactive_lab\auth，與 mooink_full_cmd_demo.py 共用，不依 IP 單獨存取、不寫入 Git 或一般 JSON 設定檔。IP 改變或更換裝置時，會重新確認裝置身分；其他裝置的憑證不會被覆寫。PIN、私鑰及配對回應不記錄至 log。
+
+配對／查詢資料夾不需要 SMB 路徑，但這不表示 PNG 可以透過原生 API 寫進 sleep。自動 PNG 傳送仍只使用實際可存取的共享路徑；沒有共享時保留本機 PNG，不會假裝傳送成功或發 F12。
+

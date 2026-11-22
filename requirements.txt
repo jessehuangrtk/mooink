@@ -12,3 +12,7 @@ pyserial>=3.5,<4
 
 # Windows tray display watcher
 pystray>=0.19.5,<1; sys_platform == "win32"
+
+# Sony-compatible Wi-Fi API pairing / diagnostics
+# Existing dpt-rp1-py installations may be reused.
+dpt-rp1-py; sys_platform == "win32"
