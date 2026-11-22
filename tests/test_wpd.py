@@ -14,6 +14,7 @@ from mook_mtp_wpd import (
     _sleep_directory,
     backup_and_delete_one,
     upload_one,
+    replace_watch_image,
     list_images,
 )
 from mook_sleep_screen_manager import MooinkLowLevel, SleepScreenManager
@@ -319,3 +320,62 @@ class UploadWpdTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WatchImageReplacementTests(unittest.TestCase):
+    def test_replace_only_reserved_png_and_backup(self):
+        previous=png_data()
+        dev,sleep,other=make_device(previous)
+        old=FakeFile(sleep,"mooink_display_10.png",previous)
+        sleep.children.append(old)
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/"mooink_display_10.png"
+            Image.new("L",(4,4),0).save(path)
+            result=replace_watch_image(path,Path(tmp)/"backup",device_source=lambda:[dev])
+            self.assertTrue(result["changed"])
+            self.assertEqual(Path(result["backup"]).read_bytes(),previous)
+            self.assertEqual(old.remove_count,1)
+            self.assertEqual(other.remove_count,0)
+            new=[x for x in sleep.children if x.name==path.name][0]
+            self.assertEqual(new.payload,path.read_bytes())
+            self.assertTrue(dev.closed)
+
+    def test_identical_image_is_not_deleted_or_uploaded(self):
+        data=png_data()
+        dev,sleep,other=make_device(data)
+        old=FakeFile(sleep,"mooink_display_10.png",data)
+        sleep.children.append(old)
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/old.name
+            path.write_bytes(data)
+            result=replace_watch_image(path,Path(tmp)/"backup",device_source=lambda:[dev])
+            self.assertFalse(result["changed"])
+            self.assertEqual(old.remove_count,0)
+            self.assertFalse((Path(tmp)/"backup").exists())
+
+    def test_invalid_old_image_keeps_original(self):
+        dev,sleep,other=make_device(png_data())
+        old=FakeFile(sleep,"mooink_display_13.png",b"not an image")
+        sleep.children.append(old)
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/old.name
+            path.write_bytes(png_data())
+            with self.assertRaises(Exception):
+                replace_watch_image(path,Path(tmp)/"backup",device_source=lambda:[dev])
+            self.assertEqual(old.remove_count,0)
+            self.assertIn(old,sleep.children)
+
+    def test_no_other_filename_and_no_multiple_reader_write(self):
+        dev,sleep,other=make_device(png_data())
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/"001.png"
+            path.write_bytes(png_data())
+            with self.assertRaises(ValueError):
+                replace_watch_image(path,Path(tmp)/"backup",device_source=lambda:[dev])
+            target=Path(tmp)/"mooink_display_10.png"
+            target.write_bytes(png_data())
+            with self.assertRaises(QuietMtpUnavailable):
+                replace_watch_image(target,Path(tmp)/"backup",
+                                    device_source=lambda:[dev,FakeDevice("mooInk 2")])
+            self.assertEqual(other.remove_count,0)
+            self.assertEqual(len(sleep.children),1)
