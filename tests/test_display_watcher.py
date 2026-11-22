@@ -2,7 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from dataclasses import replace
-from mooink_display_watcher import Settings, Processor, sha256
+from mooink_display_watcher import (Settings, Processor, sha256,
+                                    initialize_workfiles, TEMPLATE_DIR, WORK_FILES)
 
 class WatcherTests(unittest.TestCase):
     def test_size_specific_names(self):
@@ -74,3 +75,51 @@ class WatcherTests(unittest.TestCase):
                     p.check(s)
             self.assertEqual(len(attempts),2)
             self.assertEqual(p.sent,{})
+
+    def test_workfiles_copied_from_tracked_templates_without_overwriting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = root / "mooink_display_10.docx"
+            existing.write_bytes(b"my edited Word file")
+            created = initialize_workfiles(root)
+            self.assertEqual(set(created), set(WORK_FILES) - {existing.name})
+            self.assertEqual(existing.read_bytes(), b"my edited Word file")
+            for name in created:
+                self.assertEqual((root / name).read_bytes(),
+                                 (TEMPLATE_DIR / name).read_bytes())
+            self.assertEqual(initialize_workfiles(root), [])
+            self.assertEqual(existing.read_bytes(), b"my edited Word file")
+
+    def test_all_four_templates_valid(self):
+        import zipfile
+        from PIL import Image
+        for tag, size in (("10", (1404, 1872)), ("13", (1650, 2200))):
+            with zipfile.ZipFile(TEMPLATE_DIR / ("mooink_display_" + tag + ".docx")) as doc:
+                self.assertIsNone(doc.testzip())
+                self.assertIn("word/document.xml", doc.namelist())
+            with Image.open(TEMPLATE_DIR / ("mooink_display_" + tag + ".png")) as img:
+                self.assertEqual(img.size, size)
+                img.load()
+
+    def test_template_folder_is_not_a_work_folder(self):
+        with self.assertRaises(ValueError):
+            initialize_workfiles(TEMPLATE_DIR)
+        with self.assertRaises(ValueError):
+            Settings(watch_dir=str(TEMPLATE_DIR)).validate()
+
+    def test_recreated_png_is_not_mistaken_for_already_delivered_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = Settings(watch_dir=tmp, wifi_share=r"\\192.168.1.140\shared\sleep")
+            source, output = s.paths()
+            source.write_bytes(b"docx")
+            attempts = []
+            def render(src, dst, size):
+                dst.write_bytes(b"rendered PNG")
+            def upload(settings, src, digest):
+                attempts.append(src.read_bytes())
+                return str(src)
+            p = Processor(Path(tmp) / "state.json", render, upload, lambda *args: "skip")
+            p.check(s)
+            output.write_bytes(b"placeholder PNG")
+            p.check(s)
+            self.assertEqual(attempts, [b"rendered PNG", b"rendered PNG"])

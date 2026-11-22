@@ -28,3 +28,9 @@ offline_mooink_wheels.zip
 
 # Pico SDK build outputs
 pico2w_usb2bluetooth/build/
+
+# User working display files (only at checkout root; template/ is tracked)
+/mooink_display_10.docx
+/mooink_display_13.docx
+/mooink_display_10.png
+/mooink_display_13.png

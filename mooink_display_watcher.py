@@ -25,6 +25,44 @@ CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "mooink"
 CONFIG = CONFIG_DIR / "mooink_display_watcher.json"
 STATE = CONFIG_DIR / "mooink_display_watcher_state.json"
 LOG = CONFIG_DIR / "mooink_display_watcher.log"
+PROJECT_DIR = Path(__file__).resolve().parent
+TEMPLATE_DIR = PROJECT_DIR / "template"
+WORK_FILES = tuple("mooink_display_" + tag + ext
+                   for tag in ("10", "13") for ext in (".docx", ".png"))
+
+
+def initialize_workfiles(directory=PROJECT_DIR, template_dir=TEMPLATE_DIR):
+    """Seed both size pairs once, without replacing existing local files.
+
+    Exclusive creation is intentional: another process or user may create
+    a file after the initial existence check. Templates are read-only inputs.
+    """
+    directory = Path(directory).resolve()
+    template_dir = Path(template_dir).resolve()
+    if directory == template_dir or template_dir in directory.parents:
+        raise ValueError("template 是原始範本資料夾，不能作為監控目錄")
+    if not directory.is_dir():
+        raise ValueError("工作目錄不存在：" + str(directory))
+    created = []
+    for name in WORK_FILES:
+        dst = directory / name
+        if dst.exists() or dst.is_symlink():
+            continue
+        src = template_dir / name
+        data = src.read_bytes()
+        try:
+            stream = dst.open("xb")
+        except FileExistsError:
+            continue
+        try:
+            with stream:
+                stream.write(data)
+        except BaseException:
+            dst.unlink(missing_ok=True)
+            raise
+        created.append(name)
+    return created
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -45,6 +83,9 @@ class Settings:
             raise ValueError("請指定 mooInk 私有 LAN IPv4 位址")
         if not Path(self.watch_dir).is_dir():
             raise ValueError("監控目錄不存在")
+        watch_dir = Path(self.watch_dir).resolve()
+        if watch_dir == TEMPLATE_DIR.resolve() or TEMPLATE_DIR.resolve() in watch_dir.parents:
+            raise ValueError("template 是原始範本資料夾，不能作為監控目錄")
         if self.pico_port and not re.fullmatch(r"COM[1-9][0-9]*", self.pico_port, re.I):
             raise ValueError("Pico COM 埠格式為 COM6 等，空白表示停用")
         if self.wifi_share:
@@ -183,10 +224,13 @@ class Processor:
             return "等待 " + src.name
         digest = sha256(src)
         key = settings.delivery_key()
-        if not force and self.sent.get(key) == digest and dst.is_file():
+        sent = self.sent.get(key)
+        if (not force and isinstance(sent, dict) and sent.get("source") == digest
+                and dst.is_file() and sent.get("png") == sha256(dst)):
             return "無更新：" + src.name
         cache_key = str(dst.resolve())
-        if force or self.rendered.get(cache_key) != digest or not dst.is_file():
+        if (force or not dst.is_file()
+                or self.rendered.get(cache_key) != (digest, sha256(dst))):
             with tempfile.TemporaryDirectory(prefix="mooink_source_") as directory:
                 snapshot = Path(directory) / src.name
                 shutil.copyfile(src, snapshot)
@@ -194,7 +238,7 @@ class Processor:
                     return "Word 正在儲存，稍後重試"
                 log("正在轉換 " + src.name)
                 self.render(snapshot, dst, settings.size)
-            self.rendered[cache_key] = digest
+            self.rendered[cache_key] = (digest, sha256(dst))
         if sha256(src) != digest:
             return "Word 已再更新，稍後重試最新版本"
         if not settings.wifi_share:
@@ -203,7 +247,7 @@ class Processor:
         remote = self.upload(settings, dst, sha256(dst))
         # Persist successful transfer before optional wake, preventing repeated
         # upload when Pico is unavailable. Transfer failure stays retryable.
-        self.sent[key] = digest
+        self.sent[key] = {"source": digest, "png": sha256(dst)}
         write_json(self.state_path, self.sent)
         return "已驗證傳送 " + remote + "；" + self.wake(settings.pico_port, log)
 
@@ -242,12 +286,19 @@ def main():
     def worker():
         nonlocal force_pending
         previous = None
+        initialized = set()
         while not stop.is_set():
             trigger.clear()
             with settings_lock:
                 current, force = settings, force_pending
                 force_pending = False
             try:
+                directory = Path(current.watch_dir).resolve()
+                if directory not in initialized:
+                    created = initialize_workfiles(directory)
+                    if created:
+                        publish("已建立本機工作檔：" + "、".join(created))
+                    initialized.add(directory)
                 result = processor.check(current, force, publish)
             except Exception as exc:
                 result = "失敗，下次重試：" + str(exc)
@@ -332,4 +383,13 @@ def main():
     root.mainloop()
 
 if __name__=="__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description="mooInk Word 顯示監控")
+    parser.add_argument("--init-templates", action="store_true",
+                        help="只補齊專案根目錄缺少的四個工作檔，不啟動監控")
+    args = parser.parse_args()
+    if args.init_templates:
+        created = initialize_workfiles()
+        print("已建立：" + "、".join(created) if created else "四個工作檔已存在，未覆寫")
+    else:
+        main()

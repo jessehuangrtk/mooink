@@ -149,6 +149,14 @@ py mooink_full_cmd_demo.py --ip 192.168.1.137
 | 10.3 | mooink_display_10.docx | mooink_display_10.png (1404×1872) | 15.70×20.93 cm |
 | 13.3 | mooink_display_13.docx | mooink_display_13.png (1650×2200) | 20.27×27.03 cm |
 
+### 範本與使用者工作檔分離
+
+- `template/`：版本控制保留兩份 DOCX 與兩份對應的 PNG 範本。
+- 專案根目錄：同名四個檔案是使用者工作檔，已由根目錄限定的 `.gitignore` 規則排除，不會提交或隨後續 git pull 更新。
+- 第一次啟動監控或切換至新監控資料夾時，只從範本複製尚不存在的工作檔；既有 DOCX／PNG 一律不會被初始化覆寫。正常轉圖只更新所選尺寸的工作 PNG。不能直接監控 template/。
+- 只想先建立根目錄工作檔，可執行 `python mooink_display_watcher.py --init-templates`，不會啟動監控或傳送圖片。
+- **舊版升級注意：** 舊版的根目錄兩份 DOCX 曾受 Git 追蹤。請在首次拉取此版本之前關閉 Word 與 watcher，把根目錄四個工作檔複製到專案外備份。若 git pull 因已修改的 DOCX 停止，確認備份完整再還原這兩個受追蹤的檔案後重試。更新成功後，將備份的工作檔複製回根目錄；已經存在的工作檔不會被初始化覆寫。不要使用 git clean -x 清理工作檔。
+
 兩個 Word 都設直式、0.5 cm 邊界、單頁。程式依目前設定的裝置尺寸監控對應 DOCX，保留兩個尺寸獨立檔名，不會傳錯另一尺寸。需要 Word 或 LibreOffice。超過一頁會報錯，不會自動截掉第二頁。
 
 **Wi-Fi 限制：** 尚未證實第一代 mooInk 原生 Sony API 能把 PNG 寫入 sleep。程式只接受明確設定、實際可存取的同 IP UNC sleep 共享資料夾；不猜測 SMB 分享名稱，不會用 dptrp1 上傳 PNG 冒充 sleep 圖更新。未設定共享時只輸出本機 PNG，不送出 F12。若有真實共享，僅更新本程式的同名 PNG，暫存與回讀 SHA-256 驗證成功後才呼叫 Pico F12；Pico 不存在或未設定時略過。未確認實機能經此方式顯示該 PNG。裝置須已選取適當休眠圖並設好 15 秒自動休眠。
