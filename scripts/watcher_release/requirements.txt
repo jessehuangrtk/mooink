@@ -1,0 +1,7 @@
+# Standalone watcher only; no experimental Wi-Fi or screen mirroring dependencies.
+Pillow>=10.0,<13
+PyMuPDF>=1.24,<2
+pywin32>=306
+comtypes>=1.4.11
+pyserial>=3.5,<4
+pystray>=0.19.5,<1
