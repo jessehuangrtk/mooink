@@ -273,77 +273,7 @@ def upload_one(source, *, progress=None, device_source=None):
     try:
         device = _choose_device(devices)
         sleep = _sleep_directory(device)
-        candidates = [
-            obj for obj in sleep.get_children()
-            if str(getattr(obj, "name", "")).casefold() == path.name.casefold()
-        ]
-        if candidates:
-            raise FileExistsError(
-                "mooInk sleep 已有同名圖片 %s；為避免覆寫，未進行上傳" % path.name
-            )
-        _report(progress, "uploading", copied=0, total=expected_bytes,
-                message="正在透過 WPD 傳輸 %s（Windows 無位元組進度回報）" % path.name)
-        try:
-            sleep.upload_file(path.name, str(path))
-        except Exception as exc:
-            raise RuntimeError(
-                "WPD 上傳發生錯誤；裝置可能留下未完成檔案，請重新讀取 sleep 清單再處理。"
-                "原始錯誤：%s: %s" % (type(exc).__name__, exc)
-            ) from exc
-
-        _report(progress, "checking", message="上傳指令已返回，正在重新讀取 mooInk 目錄")
-        uploaded = None
-        for _ in range(8):
-            matches = [
-                obj for obj in sleep.get_children()
-                if str(getattr(obj, "name", "")).casefold() == path.name.casefold()
-                and int(getattr(obj, "content_type", -1)) == 2
-            ]
-            if len(matches) > 1:
-                raise RuntimeError("WPD 目錄出現多個同名物件，無法確認上傳")
-            if matches:
-                uploaded = matches[0]
-                break
-            time.sleep(0.5)
-        if uploaded is None:
-            raise RuntimeError(
-                "WPD 已回傳，但 sleep 內找不到 %s；不宣稱上傳成功" % path.name
-            )
-
-        remote_size = int(getattr(uploaded, "size", -1) or -1)
-        if remote_size > 0 and remote_size != expected_bytes:
-            raise RuntimeError(
-                "WPD 上傳大小不符：來源 %d bytes，裝置 %d bytes；不宣稱成功" %
-                (expected_bytes, remote_size)
-            )
-
-        _report(progress, "verifying", message="正在從 mooInk 讀回檔案並比對 SHA-256",
-                copied=expected_bytes, total=expected_bytes)
-        import tempfile
-        with tempfile.TemporaryDirectory(prefix="mooink_upload_check_") as tmp:
-            back = Path(tmp) / path.name
-            uploaded.download_file(str(back))
-            if back.stat().st_size != expected_bytes:
-                raise RuntimeError(
-                    "WPD 回讀大小不符：來源 %d bytes，回讀 %d bytes；不宣稱成功" %
-                    (expected_bytes, back.stat().st_size)
-                )
-
-            def digest(src):
-                h = hashlib.sha256()
-                with src.open("rb") as stream:
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                        h.update(chunk)
-                return h.hexdigest()
-
-            if digest(back) != digest(path):
-                raise RuntimeError(
-                    "WPD 回讀 SHA-256 不一致，無法確認裝置檔案完整；請檢查 sleep"
-                )
-
-        _report(progress, "verified", copied=expected_bytes, total=expected_bytes,
-                message="裝置回讀 SHA-256 一致，已確認上傳")
-        return "uploaded+sha256-verified; sleep: " + path.name
+        return _upload_to_sleep(sleep, path, progress)
     finally:
         for device in devices:
             close = getattr(device, "close", None)
@@ -353,6 +283,161 @@ def upload_one(source, *, progress=None, device_source=None):
                 except Exception:
                     pass
 
+
+
+def _upload_to_sleep(sleep, path, progress=None):
+    expected_bytes = path.stat().st_size
+    candidates = [
+        obj for obj in sleep.get_children()
+        if str(getattr(obj, "name", "")).casefold() == path.name.casefold()
+    ]
+    if candidates:
+        raise FileExistsError(
+            "mooInk sleep 已有同名圖片 %s；為避免覆寫，未進行上傳" % path.name
+        )
+    _report(progress, "uploading", copied=0, total=expected_bytes,
+            message="正在透過 WPD 傳輸 %s（Windows 無位元組進度回報）" % path.name)
+    try:
+        sleep.upload_file(path.name, str(path))
+    except Exception as exc:
+        raise RuntimeError(
+            "WPD 上傳發生錯誤；裝置可能留下未完成檔案，請重新讀取 sleep 清單再處理。"
+            "原始錯誤：%s: %s" % (type(exc).__name__, exc)
+        ) from exc
+
+    _report(progress, "checking", message="上傳指令已返回，正在重新讀取 mooInk 目錄")
+    uploaded = None
+    for _ in range(8):
+        matches = [
+            obj for obj in sleep.get_children()
+            if str(getattr(obj, "name", "")).casefold() == path.name.casefold()
+            and int(getattr(obj, "content_type", -1)) == 2
+        ]
+        if len(matches) > 1:
+            raise RuntimeError("WPD 目錄出現多個同名物件，無法確認上傳")
+        if matches:
+            uploaded = matches[0]
+            break
+        time.sleep(0.5)
+    if uploaded is None:
+        raise RuntimeError(
+            "WPD 已回傳，但 sleep 內找不到 %s；不宣稱上傳成功" % path.name
+        )
+
+    remote_size = int(getattr(uploaded, "size", -1) or -1)
+    if remote_size > 0 and remote_size != expected_bytes:
+        raise RuntimeError(
+            "WPD 上傳大小不符：來源 %d bytes，裝置 %d bytes；不宣稱成功" %
+            (expected_bytes, remote_size)
+        )
+
+    _report(progress, "verifying", message="正在從 mooInk 讀回檔案並比對 SHA-256",
+            copied=expected_bytes, total=expected_bytes)
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="mooink_upload_check_") as tmp:
+        back = Path(tmp) / path.name
+        uploaded.download_file(str(back))
+        if back.stat().st_size != expected_bytes:
+            raise RuntimeError(
+                "WPD 回讀大小不符：來源 %d bytes，回讀 %d bytes；不宣稱成功" %
+                (expected_bytes, back.stat().st_size)
+            )
+
+        def digest(src):
+            h = hashlib.sha256()
+            with src.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+
+        if digest(back) != digest(path):
+            raise RuntimeError(
+                "WPD 回讀 SHA-256 不一致，無法確認裝置檔案完整；請檢查 sleep"
+            )
+
+    _report(progress, "verified", copied=expected_bytes, total=expected_bytes,
+            message="裝置回讀 SHA-256 一致，已確認上傳")
+    return "uploaded+sha256-verified; sleep: " + path.name
+
+
+WATCH_NAMES = frozenset(("mooink_display_10.png", "mooink_display_13.png"))
+
+
+def replace_watch_image(source, backup_dir, *, progress=None, device_source=None):
+    """Replace only a reserved watcher image on one reader, in one WPD session.
+
+    Existing image is downloaded and validated before deletion. An identical
+    image is left untouched. No other image is removed. If a new upload fails,
+    the verified backup is retained; never blindly delete a partial upload.
+    """
+    import tempfile
+    path = Path(source).resolve()
+    if path.name not in WATCH_NAMES or not path.is_file():
+        raise ValueError("只能更新 Watch Tool 專用 PNG")
+    _verify_local_image(path)
+    expected_hash = hashlib.sha256(path.read_bytes()).digest()
+    devices = _get_device_list() if device_source is None else list(device_source())
+    backup = None
+    try:
+        sleep = _sleep_directory(_choose_device(devices))
+        def matches():
+            return [obj for obj in sleep.get_children()
+                    if str(getattr(obj, "name", "")).casefold() == path.name.casefold()]
+        found = matches()
+        if len(found) > 1 or (found and int(getattr(found[0], "content_type", -1)) != 2):
+            raise QuietMtpUnavailable("專用檔名有重複或不是檔案，停止更新")
+        if found:
+            item = found[0]
+            size = int(getattr(item, "size", -1) or -1)
+            with tempfile.TemporaryDirectory(prefix="mooink_old_") as tmp:
+                old = Path(tmp) / path.name
+                item.download_file(str(old))
+                if not old.is_file() or old.stat().st_size <= 0 or (size > 0 and old.stat().st_size != size):
+                    raise RuntimeError("舊 PNG 回讀大小不符，原檔保留")
+                _verify_local_image(old)
+                old_hash = hashlib.sha256(old.read_bytes()).digest()
+                if old_hash == expected_hash:
+                    _report(progress, "verified", message="已存在相同 PNG，回讀 SHA-256 一致")
+                    return {"changed": False, "name": path.name, "backup": None}
+                if size <= 0:
+                    raise RuntimeError("舊 PNG 缺少有效 WPD 大小，拒絕刪除")
+                backup = _unique_backup_path(Path(backup_dir).resolve(), path.name)
+                with backup.open("xb") as stream:
+                    stream.write(old.read_bytes())
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if hashlib.sha256(backup.read_bytes()).digest() != old_hash:
+                    raise RuntimeError("本機備份驗證失敗，原檔保留")
+                # Confirm the latest object is still the backed-up image.
+                latest = matches()
+                if len(latest) != 1 or int(getattr(latest[0], "content_type", -1)) != 2 or int(getattr(latest[0], "size", -1) or -1) != size:
+                    raise RuntimeError("舊 PNG 已變更，拒絕刪除")
+                reread = Path(tmp) / "recheck.png"
+                latest[0].download_file(str(reread))
+                if hashlib.sha256(reread.read_bytes()).digest() != old_hash:
+                    raise RuntimeError("舊 PNG 內容已變更，拒絕刪除")
+                if hashlib.sha256(path.read_bytes()).digest() != expected_hash:
+                    raise RuntimeError("本機 PNG 已變更，拒絕刪除")
+                _report(progress, "backup", message="舊 PNG 已備份：" + str(backup))
+                latest[0].remove()
+                if matches():
+                    raise RuntimeError("未確認舊 PNG 刪除，停止上傳")
+        _upload_to_sleep(sleep, path, progress)
+        if hashlib.sha256(path.read_bytes()).digest() != expected_hash:
+            raise RuntimeError("本機 PNG 在傳送期間變更")
+        return {"changed": True, "name": path.name, "backup": str(backup) if backup else None}
+    except Exception:
+        if backup:
+            _report(progress, "backup", message="更新未完成，舊 PNG 備份保留：" + str(backup))
+        raise
+    finally:
+        for device in devices:
+            close = getattr(device, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
 
 def list_images(*, device_source=None):
