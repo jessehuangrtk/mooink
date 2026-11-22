@@ -31,6 +31,8 @@ class FakeSerial:
             response = "OK STATUS ready=1 paired=1 connected=1 pairing=0 connecting=0 peer=AA:BB:CC:DD:EE:FF"
         elif cmd.startswith("KEY "):
             response = "EVENT diagnostic\r\nOK KEY SENT"
+        elif cmd.startswith("KEYH "):
+            response = "EVENT KEY DOWN\r\nEVENT KEY UP\r\nOK KEYH SENT"
         else:
             response = "ERR UNKNOWN_COMMAND"
         self.buffer.extend((response + "\r\n").encode())
@@ -65,6 +67,16 @@ class KeyboardTests(unittest.TestCase):
             self.assertEqual(board.ser.commands[-1], "KEY 0 69")
             self.assertIn("EVENT diagnostic", received)
         self.assertFalse(board.ser.is_open)
+
+    def test_long_space_diagnostic(self):
+        received = []
+        with PicoKeyboard("COM6", serial_factory=FakeSerial, event=received.append) as board:
+            self.assertEqual(board.wake("space", hold_ms=500), "OK KEYH SENT")
+            self.assertEqual(board.ser.commands[-1], "KEYH 0 44 500")
+            self.assertIn("EVENT KEY DOWN", received)
+            self.assertIn("EVENT KEY UP", received)
+            with self.assertRaises(ValueError):
+                board.wake("space", hold_ms=2001)
 
     def test_invalid_text_does_not_send_partial(self):
         with PicoKeyboard("COM6", serial_factory=FakeSerial) as board:

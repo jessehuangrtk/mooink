@@ -34,6 +34,8 @@ static uint32_t pair_end,key_end,release_at,connect_end;
 static unsigned pairing_request;
 static enum {IDLE,DOWN,HOLD,UP} key_state;
 static uint8_t key_usage,key_mod;
+static unsigned key_hold_ms=60;
+static bool key_extended;
 static char line[100];
 static unsigned line_len;
 static bool overflow;
@@ -51,14 +53,14 @@ static void stop_pair(void){
   pairing_request=0;
 }
 static void key_fail(const char *why){
-  if(key_state!=IDLE){key_state=IDLE;printf("ERR KEY %s\n",why);}
+  if(key_state!=IDLE){key_state=IDLE;printf("ERR %s %s\n",key_extended?"KEYH":"KEY",why);}
 }
 static void report(uint8_t mod,uint8_t usage){
   uint8_t data[]={0xa1,1,mod,0,usage,0,0,0,0,0};
   hid_device_send_interrupt_message(cid,data,sizeof(data));
 }
 static void command(char *s){
-  unsigned mod,usage;char tail;
+  unsigned mod,usage,hold;char tail;
   if(!strcmp(s,"HELLO")){puts("OK HELLO MOOINK_PICO2W_BT/1");return;}
   if(!strcmp(s,"STATUS")){
     printf("OK STATUS ready=%u paired=%u connected=%u pairing=%u connecting=%u peer=%s\n",
@@ -104,11 +106,19 @@ static void command(char *s){
     else {puts("ERR PIN EXPECTED_SIX_DIGITS_OR_CONFIRM");return;}
     puts("OK PIN");return;
   }
-  if(sscanf(s,"KEY %u %u %c",&mod,&usage,&tail)==2){
+  // KEY retains its original 60 ms semantics. KEYH is opt-in test only.
+  hold=60;
+  bool is_key=sscanf(s,"KEY %u %u %c",&mod,&usage,&tail)==2;
+  bool is_hold=false;
+  if(!is_key){
+    is_hold=sscanf(s,"KEYH %u %u %u %c",&mod,&usage,&hold,&tail)==3;
+  }
+  if(is_key||is_hold){
     if(!connected||!paired){puts("ERR KEY NOT_CONNECTED");return;}
     if(key_state!=IDLE){puts("ERR KEY BUSY");return;}
-    if(mod>255||usage<4||usage>231){puts("ERR KEY INVALID_USAGE");return;}
-    key_mod=(uint8_t)mod;key_usage=(uint8_t)usage;key_end=ms()+5000;key_state=DOWN;
+    if(mod>255||usage<4||usage>231||hold<20||hold>2000){puts("ERR KEY INVALID_USAGE_OR_HOLD");return;}
+    key_hold_ms=hold;key_extended=is_hold;
+    key_mod=(uint8_t)mod;key_usage=(uint8_t)usage;key_end=ms()+hold+5000;key_state=DOWN;
     hid_device_request_can_send_now_event(cid);return;
   }
   puts("ERR UNKNOWN_COMMAND");
@@ -182,8 +192,14 @@ static void packet(uint8_t type,uint16_t channel,uint8_t *p,uint16_t size){
       return;
     case HID_SUBEVENT_CAN_SEND_NOW:
       if(!connected||hid_subevent_can_send_now_get_hid_cid(p)!=cid)return;
-      if(key_state==DOWN){report(key_mod,key_usage);key_state=HOLD;release_at=ms()+60;}
-      else if(key_state==UP){report(0,0);key_state=IDLE;puts("OK KEY SENT");}
+      if(key_state==DOWN){
+        report(key_mod,key_usage);key_state=HOLD;release_at=ms()+key_hold_ms;
+        if(key_extended)printf("EVENT KEY DOWN mod=%u usage=%u hold_ms=%u\n",key_mod,key_usage,key_hold_ms);
+      }else if(key_state==UP){
+        report(0,0);key_state=IDLE;
+        if(key_extended){puts("EVENT KEY UP");puts("OK KEYH SENT");}
+        else puts("OK KEY SENT");
+      }
       return;
     default:return;
     }

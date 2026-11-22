@@ -81,3 +81,14 @@ ASCII 每行一命令、LF/CRLF，115200（USB CDC 標示速度）。回覆 OK /
 參考：
 - https://github.com/raspberrypi/pico-examples/tree/master/bluetooth/btstack_examples/hid_keyboard_demo
 - https://www.raspberrypi.com/documentation/pico-sdk/networking.html
+
+## 8. Space 喚醒診斷
+
+實體鍵盤的 Space 已能喚醒 mooInk；Pico 的 Classic HID 連線正常但短按未喚醒。先確認 mooInk 清醒時在搜尋欄能接收 Pico 的普通按鍵，再重新編譯／燒錄新版 UF2，比較 60 ms、500 ms、1000 ms 的 Space。新版新增 `KEYH mod usage hold_ms`（20～2000 ms），並回報 DOWN/UP；原 KEY 保持 60 ms，配對及 Watch Tool 預設行為不變。
+
+~~~powershell
+python pico2w_usb2bluetooth.py --port COM6 wake --key space --hold-ms 500
+python pico2w_usb2bluetooth.py --port COM6 wake --key space --hold-ms 1000
+~~~
+
+長按可能在清醒時造成重複輸入或翻頁，僅用於明確的診斷操作。KEYH SENT 是本地 BTstack 交付回報，不是主機確認。

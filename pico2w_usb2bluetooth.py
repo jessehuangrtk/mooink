@@ -195,11 +195,22 @@ class PicoKeyboard:
     def key(self, value):
         return self.send(*shortcut(value))
 
-    def wake(self, key="shift+f12", wait=0):
-        # A normal HID keyboard tap, not a confirmed system wake opcode.
-        # Default F12 is chosen to avoid inserting text; change if needed.
+    def wake(self, key="f12", wait=0, *, hold_ms=None):
+        # Ordinary HID tap, not proof of a physical wake. Longer diagnostic
+        # taps require the updated firmware and never silently fall back.
+        if hold_ms is not None and (not isinstance(hold_ms, int) or not 20 <= hold_ms <= 2000):
+            raise ValueError("hold_ms 必須為 20～2000 ms")
+        mod, usage = shortcut(key)
         self.ensure_connected()
-        response = self.key(key)
+        if hold_ms is None:
+            response = self.send(mod, usage)
+        else:
+            try:
+                response = self.command("KEYH %d %d %d" % (mod, usage, hold_ms), timeout=10)
+            except RuntimeError as exc:
+                if str(exc) == "ERR UNKNOWN_COMMAND":
+                    raise RuntimeError("Pico 仍為舊韌體；請重新燒錄支援 KEYH 的 UF2") from exc
+                raise
         if wait:
             time.sleep(wait)
         return response
@@ -380,7 +391,7 @@ def main(argv=None):
     p = sub.add_parser("pin"); p.add_argument("value", nargs="?")
     p = sub.add_parser("key"); p.add_argument("value")
     p = sub.add_parser("text"); p.add_argument("value")
-    p = sub.add_parser("wake"); p.add_argument("--key", default="f12"); p.add_argument("--wait", type=float, default=0)
+    p = sub.add_parser("wake"); p.add_argument("--key", default="f12"); p.add_argument("--wait", type=float, default=0); p.add_argument("--hold-ms", type=int, help="診斷：按住 20～2000 ms（需新版 UF2）")
     args = parser.parse_args(argv)
     try:
         if args.action == "ports":
@@ -406,7 +417,7 @@ def main(argv=None):
             elif action == "wake":
                 if not 0 <= args.wait <= 300:
                     raise ValueError("--wait 必須 0～300 秒")
-                print(board.wake(args.key, args.wait))
+                print(board.wake(args.key, args.wait, hold_ms=args.hold_ms))
                 print("按鍵已送出，不代表實體螢幕已確認喚醒。")
             elif action == "key":
                 board.ensure_connected()
