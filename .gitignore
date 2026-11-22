@@ -38,3 +38,7 @@ pico2w_usb2bluetooth/build/
 # Generated display cover PDFs
 /mooink_display_10.pdf
 /mooink_display_13.pdf
+
+# Windows Mark-of-the-Web metadata exposed as files in WSL
+*:Zone.Identifier
+*:Zone.Identifier:*
