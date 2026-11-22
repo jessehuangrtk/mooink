@@ -34,3 +34,7 @@ pico2w_usb2bluetooth/build/
 /mooink_display_13.docx
 /mooink_display_10.png
 /mooink_display_13.png
+
+# Generated display cover PDFs
+/mooink_display_10.pdf
+/mooink_display_13.pdf

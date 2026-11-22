@@ -4,6 +4,10 @@ from pathlib import Path
 from mooink_display_watcher import (Settings, Processor, sha256,
                                     initialize_workfiles, TEMPLATE_DIR, WORK_FILES)
 
+def fake_pdf(png, pdf, size):
+    pdf.write_bytes(b"%PDF-test " + png.read_bytes())
+
+
 class WatcherTests(unittest.TestCase):
     def test_size_specific_names(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -21,10 +25,10 @@ class WatcherTests(unittest.TestCase):
                 calls.append(size)
                 dst.write_bytes(b"png")
             state=Path(tmp)/"state.json"
-            p=Processor(state, render)
-            self.assertIn("尚未驗證", p.check(s))
+            p=Processor(state, render, fake_pdf)
+            self.assertIn("尚未啟用", p.check(s))
             self.assertIn("無更新", p.check(s))
-            self.assertIn("無更新", Processor(state, render).check(s))
+            self.assertIn("無更新", Processor(state, render, fake_pdf).check(s))
             self.assertEqual(calls,["10.3"])
             self.assertTrue(output.is_file())
 
@@ -36,7 +40,7 @@ class WatcherTests(unittest.TestCase):
             def fail(*args):
                 attempts.append(1)
                 raise OSError("render failed")
-            p=Processor(Path(tmp)/"state.json", fail)
+            p=Processor(Path(tmp)/"state.json", fail, fake_pdf)
             for _ in range(2):
                 with self.assertRaises(OSError):
                     p.check(s)
@@ -83,7 +87,7 @@ class WatcherTests(unittest.TestCase):
             def render(src, dst, size):
                 attempts.append(size)
                 dst.write_bytes(b"rendered PNG")
-            p = Processor(Path(tmp) / "state.json", render)
+            p = Processor(Path(tmp) / "state.json", render, fake_pdf)
             p.check(s)
             output.write_bytes(b"placeholder PNG")
             p.check(s)

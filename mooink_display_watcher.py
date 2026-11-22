@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Windows tray watcher: size-specific DOCX -> PNG, native Wi-Fi API pairing and diagnostics.
-Native Wi-Fi writing to the reader's sleep directory is not yet verified.
-Automatic wake must wait for a verified image transfer; manual F12 test is available.
+"""Windows tray watcher: DOCX -> PNG / single-page PDF -> native Wi-Fi document API.
+Experimental sleep-cover workflow; never accesses the MTP sleep directory.
 """
 from __future__ import annotations
 import hashlib
@@ -16,6 +15,7 @@ import re
 import shutil
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, asdict
 import uuid
 
@@ -71,6 +71,7 @@ class Settings:
     interval_sec: int = 60
     mooink_ip: str = "192.168.1.140"
     pico_port: str = "COM6"  # blank disables Pico
+    enable_wifi_cover: bool = False  # explicit opt-in for automatic document writes
 
     def validate(self):
         if self.size not in RESOLUTIONS:
@@ -95,7 +96,7 @@ class Settings:
         return root / (stem + ".docx"), root / (stem + ".png")
 
     def render_key(self):
-        return json.dumps(["render-v2", str(Path(self.watch_dir).resolve()), self.size],
+        return json.dumps(["render-v3", str(Path(self.watch_dir).resolve()), self.size],
                           ensure_ascii=False)
 
 def read_json(path, default):
@@ -168,6 +169,25 @@ def render_png(source, output, size):
         if com is not None:
             com.CoUninitialize()
 
+def make_cover_pdf(png, pdf, size):
+    """Make the first/only page identical to the generated screen image."""
+    import pymupdf
+    # Physical screen dimensions, in points, with exact 3:4 ratio.
+    diagonal = float(size) * 72
+    width, height = diagonal * 3 / 5, diagonal * 4 / 5
+    pdf = Path(pdf)
+    temporary = pdf.with_name("." + pdf.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        with pymupdf.open() as doc:
+            page = doc.new_page(width=width, height=height)
+            page.insert_image(page.rect, filename=str(png), keep_proportion=True)
+            doc.set_metadata({"title": pdf.stem})
+            doc.save(str(temporary), deflate=True)
+        os.replace(temporary, pdf)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def pico_wake(port, log):
     if not port:
         return "未設定 Pico，略過 F12"
@@ -182,35 +202,86 @@ def pico_wake(port, log):
         return "Pico 喚醒略過：" + str(exc)
 
 class Processor:
-    """Persist completed local renders; never claim an unverified remote update."""
-    def __init__(self, state_path=STATE, render=render_png):
+    """Track local renders separately from verified upload/open per device."""
+    def __init__(self, state_path=STATE, render=render_png, pdf_render=make_cover_pdf,
+                 connect=None, identify=None, upload=None, open_pdf=None,
+                 wake=pico_wake, delay=time.sleep):
         self.state_path = state_path
         self.rendered = read_json(state_path, {})
         self.render = render
+        self.pdf_render = pdf_render
+        self.connect, self.identify = connect, identify
+        self.upload, self.open_pdf = upload, open_pdf
+        self.wake, self.delay = wake, delay
 
     def check(self, settings, force=False, log=lambda msg: None):
         settings.validate()
         src, dst = settings.paths()
+        pdf = dst.with_suffix(".pdf")
         if not src.is_file():
             return "等待 " + src.name
         digest = sha256(src)
         key = settings.render_key()
         record = self.rendered.get(key)
-        if (not force and isinstance(record, dict) and record.get("source") == digest
-                and dst.is_file() and record.get("png") == sha256(dst)):
-            return "無更新：" + src.name
-        with tempfile.TemporaryDirectory(prefix="mooink_source_") as directory:
-            snapshot = Path(directory) / src.name
-            shutil.copyfile(src, snapshot)
-            if sha256(snapshot) != digest or sha256(src) != digest:
-                return "Word 正在儲存，稍後重試"
-            log("正在轉換 " + src.name)
-            self.render(snapshot, dst, settings.size)
-        if sha256(src) != digest:
-            return "Word 已再更新，稍後重試最新版本"
-        self.rendered[key] = {"source": digest, "png": sha256(dst)}
-        write_json(self.state_path, self.rendered)
-        return dst.name + " 已輸出；原生 Wi-Fi 休眠圖片寫入尚未驗證"
+        current = (isinstance(record, dict) and record.get("source") == digest
+                   and dst.is_file() and record.get("png") == sha256(dst)
+                   and pdf.is_file() and record.get("pdf") == sha256(pdf))
+        if force or not current:
+            with tempfile.TemporaryDirectory(prefix="mooink_source_") as directory:
+                snapshot = Path(directory) / src.name
+                shutil.copyfile(src, snapshot)
+                if sha256(snapshot) != digest or sha256(src) != digest:
+                    return "Word 正在儲存，稍後重試"
+                log("正在轉換 " + src.name)
+                self.render(snapshot, dst, settings.size)
+                self.pdf_render(dst, pdf, settings.size)
+            if sha256(src) != digest:
+                return "Word 已再更新，稍後重試最新版本"
+            record = {"source": digest, "png": sha256(dst), "pdf": sha256(pdf)}
+            self.rendered[key] = record
+            write_json(self.state_path, self.rendered)
+            log("本機 PNG / PDF 已輸出：" + pdf.name)
+        if not settings.enable_wifi_cover:
+            return ("無更新：" + src.name if current and not force else
+                    pdf.name + " 已輸出；Wi-Fi 自動傳送尚未啟用")
+
+        from mooink_wifi_pairing import connect_saved, identity
+        from mooink_wifi_cover import upload_cover, open_cover, check_identity
+        identify = self.identify or identity
+        device = identify(settings.mooink_ip)
+        delivery = json.dumps(["cover-v1", key, device], ensure_ascii=False)
+        if not force and self.rendered.get(delivery) == record:
+            return "無更新：" + src.name + "（PDF 已傳送並要求開啟）"
+        log("連線並傳送 PDF：" + settings.mooink_ip)
+        client, connected_device = (self.connect or connect_saved)(settings.mooink_ip)
+        def confirm_device():
+            if self.identify:
+                if identify(settings.mooink_ip) != device:
+                    raise RuntimeError("IP 對應裝置已變更")
+            else:
+                check_identity(settings.mooink_ip, device)
+        try:
+            if connected_device != device:
+                raise RuntimeError("IP 對應裝置已變更")
+            confirm_device()
+            doc_id = (self.upload or upload_cover)(client, pdf, log)
+            if sha256(src) != digest or sha256(pdf) != record["pdf"]:
+                return "檔案已更新，暫不開啟舊 PDF；稍後重試"
+            confirm_device()
+            wake_result = self.wake(settings.pico_port, log)
+            log(wake_result)
+            if wake_result.startswith("F12 已送出"):
+                self.delay(2)
+            confirm_device()
+            status = (self.open_pdf or open_cover)(client, doc_id)
+            if not 200 <= status < 300:
+                raise RuntimeError("開啟 PDF HTTP %s" % status)
+            log("開啟 PDF 第 1 頁 HTTP %s" % status)
+            self.rendered[delivery] = dict(record)
+            write_json(self.state_path, self.rendered)
+            return "PDF 回讀驗證成功；開啟 HTTP %s；%s；請觀察自動休眠封面" % (status, wake_result)
+        finally:
+            client.session.close()
 
 def main():
     import tkinter as tk
@@ -231,6 +302,7 @@ def main():
     events = queue.Queue()
     stop, trigger = threading.Event(), threading.Event()
     settings_lock = threading.Lock()
+    operation_lock = threading.Lock()  # serialize pairing, manual F12 and delivery
     force_pending = False
     status_text = tk.StringVar(value="等待首次檢查")
     processor = Processor()
@@ -260,7 +332,8 @@ def main():
                     if created:
                         publish("已建立本機工作檔：" + "、".join(created))
                     initialized.add(directory)
-                result = processor.check(current, force, publish)
+                with operation_lock:
+                    result = processor.check(current, force, publish)
             except Exception as exc:
                 result = "失敗，下次重試：" + str(exc)
             if result != previous or force:
@@ -283,16 +356,26 @@ def main():
             widget=ttk.Entry(frame,textvariable=fields[name],width=47)
         widget.grid(row=index,column=1,sticky="ew",padx=8)
     ttk.Button(frame,text="瀏覽",command=lambda: fields["watch_dir"].set(filedialog.askdirectory() or fields["watch_dir"].get())).grid(row=0,column=2)
-    ttk.Label(frame,text="10.3：mooink_display_10.docx → mooink_display_10.png\n13.3：mooink_display_13.docx → mooink_display_13.png\nWi-Fi API 休眠圖片寫入尚待驗證；可先測試配對及 F12。",wraplength=530).grid(row=6,column=0,columnspan=3,sticky="w",pady=8)
+    enable_cover = tk.BooleanVar(value=settings.enable_wifi_cover)
+    ttk.Checkbutton(frame,text="啟用 Wi-Fi 自動更新 PDF 封面（測試）",
+                    variable=enable_cover).grid(row=5,column=0,columnspan=3,sticky="w",pady=5)
+    ttk.Label(frame,text="依尺寸產生 mooink_display_10 / 13 的 PNG 與單頁 PDF。\n傳送至 Document/ 同名專用 PDF，可覆寫；設定閱讀中書本封面為休眠圖。\n上傳回讀成功 → Pico F12（選用）→ 開啟 PDF 第 1 頁。",wraplength=530).grid(row=6,column=0,columnspan=3,sticky="w",pady=8)
     ttk.Label(frame,textvariable=status_text,wraplength=550).grid(row=7,column=0,columnspan=3,sticky="w",pady=5)
     def save():
         nonlocal settings, force_pending
         try:
             values={k:v.get().strip() for k,v in fields.items()}
             values["interval_sec"]=int(values["interval_sec"])
+            values["enable_wifi_cover"] = bool(enable_cover.get())
             new=Settings(**values).validate()
+            if new.enable_wifi_cover and (not settings.enable_wifi_cover or
+                    new.mooink_ip != settings.mooink_ip or new.size != settings.size):
+                if not messagebox.askyesno("啟用 PDF 封面更新",
+                    "將自動建立或覆寫目標 mooInk 的 Document/ 專用 mooink_display_10.pdf 或 mooink_display_13.pdf，並開啟它。\n請確認 IP、Pico 配對目標一致。其他書籍不會刪除。確定啟用？",parent=root):
+                    return
             write_json(CONFIG,asdict(new))
             with settings_lock:
+                force_pending = force_pending or (new.enable_wifi_cover and new != settings)
                 settings=new
             trigger.set()
             root.withdraw()
@@ -360,6 +443,16 @@ def main():
 
         def run():
             try:
+                with operation_lock:
+                    result = perform_action()
+                events.put(("wifi_result", (ip, action, result, None)))
+            except WifiPairingError as exc:
+                events.put(("wifi_result", (ip, action, None, str(exc))))
+            except Exception as exc:
+                events.put(("wifi_result", (ip, action, None,
+                    "Wi-Fi 操作失敗（%s）；請檢查裝置及相依套件。" % type(exc).__name__)))
+
+        def perform_action():
                 if action == "pair":
                     device = pair(ip, request_pin)
                     result = ("已配對並驗證，憑證已加密儲存", device)
@@ -372,12 +465,7 @@ def main():
                     result = pico_wake(port, logger.info)
                 else:
                     result = ("已通過 Wi-Fi API 認證", test_connection(ip))
-                events.put(("wifi_result", (ip, action, result, None)))
-            except WifiPairingError as exc:
-                events.put(("wifi_result", (ip, action, None, str(exc))))
-            except Exception as exc:
-                events.put(("wifi_result", (ip, action, None,
-                    "Wi-Fi 操作失敗（%s）；請檢查裝置及相依套件。" % type(exc).__name__)))
+                return result
         threading.Thread(target=run, daemon=True).start()
 
     for label, action in (("Wi-Fi 配對","pair"),("匯入既有憑證","import"),
@@ -396,7 +484,7 @@ def main():
         return lambda *_: events.put((action,None))
     tray=pystray.Icon("mooink_display",icon,"mooInk Display Watcher",pystray.Menu(
         pystray.MenuItem("設定／Wi-Fi 配對",tray_action("settings"),default=True),
-        pystray.MenuItem("立即重新轉圖",tray_action("check")),
+        pystray.MenuItem("立即重新轉圖／傳送",tray_action("check")),
         pystray.MenuItem("開啟監控目錄",tray_action("folder")),
         pystray.MenuItem("開啟執行記錄",tray_action("log")),
         pystray.MenuItem("結束",tray_action("exit"))))

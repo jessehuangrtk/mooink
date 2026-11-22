@@ -37,7 +37,7 @@ jobs:
 
       - name: Check Python syntax
         run: |
-          python -m compileall -q mook_sleep_screen_manager.py mook_sleep_screen_manager_ui.py mooink_full_cmd_demo.py mooink_display_watcher.py mooink_wifi_pairing.py tests
+          python -m compileall -q mook_sleep_screen_manager.py mook_sleep_screen_manager_ui.py mooink_full_cmd_demo.py mooink_display_watcher.py mooink_wifi_pairing.py mooink_wifi_cover.py tests
 
       - name: Backend regression tests (no reader required)
         run: |

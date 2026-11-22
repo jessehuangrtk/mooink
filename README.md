@@ -159,7 +159,7 @@ py mooink_full_cmd_demo.py --ip 192.168.1.137
 
 兩個 Word 都設直式、0.5 cm 邊界、單頁。程式依目前設定的裝置尺寸監控對應 DOCX，保留兩個尺寸獨立檔名，不會傳錯另一尺寸。需要 Word 或 LibreOffice。超過一頁會報錯，不會自動截掉第二頁。
 
-**Wi-Fi 限制：** 第一代 mooInk 原生 API 寫入 sleep PNG 尚未驗證。監控程式目前自動轉換本機 PNG；配對及資料夾查詢保留，F12 可在設定視窗手動測試。待原生 API 傳送成功驗證後再啟用自動喚醒。
+**Wi-Fi PDF 封面測試：** 原生文件 API 無法解析 sleep（實測 HTTP 404），但使用者已確認可將閱讀中的書本封面設為休眠圖。Watch Tool 改為產生單頁 PDF，啟用後透過原生 API 上傳、回讀驗證、選用 Pico F12 喚醒及開啟第 1 頁。實體封面刷新仍待驗證。
 
 
 
@@ -173,5 +173,14 @@ py mooink_full_cmd_demo.py --ip 192.168.1.137
 
 憑證依閱讀器的動態識別碼保存在 %LOCALAPPDATA%\mooink_interactive_lab\auth，與 mooink_full_cmd_demo.py 共用，不依 IP 單獨存取、不寫入 Git 或一般 JSON 設定檔。IP 改變或更換裝置時，會重新確認裝置身分；其他裝置的憑證不會被覆寫。PIN、私鑰及配對回應不記錄至 log。
 
-配對與查詢資料夾使用原生 Wi-Fi API。尚未驗證休眠 PNG 直接傳送，不會在只有本機轉圖完成時自動發 F12。
+配對、資料夾查詢和 PDF 傳送均使用原生 Wi-Fi API；不直接寫入 sleep PNG。
 
+
+### PDF 封面更新測試
+
+1. mooInk 設定「正在閱讀的書本封面」作為休眠圖，15 秒自動休眠。
+2. Watch Tool 設定中確認 IP、尺寸及 Wi-Fi 配對；COM 可留空。若有 Pico，確認它配對的是同一台閱讀器。
+3. 勾選「啟用 Wi-Fi 自動更新 PDF 封面（測試）」並儲存。首次啟用或手動立即重新轉圖／傳送會執行更新。
+4. 對應尺寸將產生本機 PNG 及 PDF（均 Git ignore），上傳 `Document/mooink_display_10.pdf` 或 `Document/mooink_display_13.pdf`。僅這兩個專用名稱會被覆寫，不刪除任何文件。回讀 SHA-256 一致後才嘗試 F12（若可用，等待 2 秒）並要求開啟第 1 頁。
+5. 測試第一次顯示及休眠，再修改 Word 內容並儲存，觀察同名 PDF 覆寫後封面是否立即更新。HTTP 2xx 不是實體畫面更新證明；若封面仍舊，可能是封面快取，下一步再測試輪替名稱。未設定 Pico 時可先手動喚醒，程式仍嘗試開啟 PDF。
+6. 失敗保留本機檔案，下次檢查再試；已完成上傳及開啟的相同內容不重複傳送。日誌記錄各階段，不記錄私鑰或 PIN。
