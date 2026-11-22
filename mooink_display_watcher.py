@@ -28,7 +28,7 @@ STATE = CONFIG_DIR / "mooink_display_watcher_state.json"
 LOG = CONFIG_DIR / "mooink_display_watcher.log"
 PROJECT_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = PROJECT_DIR / "template"
-USB_POLL_SEC = 2.0  # Independent of the document check interval.
+USB_POLL_SEC = 1.0  # Independent of the document check interval.
 WORK_FILES = tuple("mooink_display_" + tag + ext
                    for tag in ("10", "13") for ext in (".docx", ".png"))
 
@@ -189,6 +189,95 @@ def usb_list():
         pythoncom.CoUninitialize()
 
 
+def usb_probe():
+    import pythoncom
+    from mook_mtp_wpd import probe_reader
+    pythoncom.CoInitialize()
+    try:
+        return probe_reader()
+    finally:
+        pythoncom.CoUninitialize()
+
+
+def reader_event_matches(path, identity):
+    """Match a WPD interface notification to the known reader, not Pico."""
+    path = str(path or "").casefold()
+    identity = str(identity or "").casefold()
+    if not path:
+        return False
+    if "vid_1f85" in path and "pid_4e16" in path:
+        return True
+    # WPD interface class suffixes can differ between enumeration and events.
+    def prefix(value):
+        return value.split("#{", 1)[0]
+    return bool(identity and prefix(path) == prefix(identity))
+
+
+def watch_device_events(stop, notify, log):
+    """Windows WPD arrival/removal events accelerate polling; poll is fallback."""
+    if os.name != "nt":
+        return
+    import ctypes
+    import uuid as _uuid
+    from ctypes import wintypes
+    hwnd = None
+    handle = None
+    atom = None
+    try:
+        import win32gui
+        import win32api
+        import win32con
+        class DeviceFilter(ctypes.Structure):
+            _fields_ = [("size", wintypes.DWORD), ("kind", wintypes.DWORD),
+                        ("reserved", wintypes.DWORD), ("guid", ctypes.c_ubyte * 16),
+                        ("name", wintypes.WCHAR * 1)]
+        def proc(hwnd, message, wp, lp):
+            if message == 0x0219:  # WM_DEVICECHANGE
+                path = ""
+                if wp in (0x8000, 0x8004) and lp:  # interface arrival/removal
+                    data = DeviceFilter.from_address(lp)
+                    offset = DeviceFilter.name.offset
+                    if data.kind == 5 and offset < data.size <= 65536:
+                        count = (data.size - offset) // ctypes.sizeof(wintypes.WCHAR)
+                        path = ctypes.wstring_at(lp + offset, count).split("\0", 1)[0]
+                if wp in (7, 0x8000, 0x8004):
+                    notify(path)
+                return 1
+            return win32gui.DefWindowProc(hwnd, message, wp, lp)
+        cls = win32gui.WNDCLASS()
+        cls.hInstance = win32api.GetModuleHandle(None)
+        cls.lpszClassName = "mooInkWatcher_" + _uuid.uuid4().hex
+        cls.lpfnWndProc = proc
+        atom = win32gui.RegisterClass(cls)
+        hwnd = win32gui.CreateWindow(atom, "", 0, 0, 0, 0, 0, 0, 0, cls.hInstance, None)
+        filt = DeviceFilter()
+        filt.size = ctypes.sizeof(filt)
+        filt.kind = 5  # DBT_DEVTYP_DEVICEINTERFACE
+        filt.guid[:] = _uuid.UUID("6ac27878-a6fa-4155-ba85-f98f491d4f33").bytes_le
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        register = user32.RegisterDeviceNotificationW
+        register.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
+        register.restype = wintypes.HANDLE
+        handle = register(hwnd, ctypes.byref(filt), 0)
+        if not handle:
+            log("WPD 插拔事件註冊失敗；保留每秒輪詢")
+        while not stop.is_set():
+            win32gui.PumpWaitingMessages()
+            stop.wait(0.1)
+    except Exception as exc:
+        log("Windows 插拔事件不可用，使用每秒輪詢：" + str(exc))
+    finally:
+        if handle:
+            unregister = user32.UnregisterDeviceNotification
+            unregister.argtypes = [wintypes.HANDLE]
+            unregister.restype = wintypes.BOOL
+            unregister(handle)
+        if hwnd:
+            win32gui.DestroyWindow(hwnd)
+        if atom:
+            win32gui.UnregisterClass(cls.lpszClassName, cls.hInstance)
+
+
 def pico_wake(port, log):
     if not port:
         return "未設定 Pico，略過 Space"
@@ -205,16 +294,18 @@ def pico_wake(port, log):
 class Processor:
     """Check WPD readiness separately from scheduled document renders."""
     def __init__(self, state_path=STATE, render=render_png, upload=usb_upload,
-                 wake=pico_wake, probe=usb_list):
+                 wake=pico_wake, probe=usb_probe):
         self.state_path = state_path
         self.rendered = read_json(state_path, {})
         self.render, self.upload, self.wake, self.probe = render, upload, wake, probe
         self.usb_ready = False
         self.reconnect_pending = False
         self.usb_key = None
+        self.reader_identity = None
 
     def check(self, settings, force=False, log=lambda msg: None, *,
-              scheduled=True, on_success=lambda result: None):
+              scheduled=True, on_success=lambda result: None,
+              on_connection=lambda status: None, device_events=()):
         settings.validate()
         key = settings.render_key()
         usb_key = key if settings.enable_usb else None
@@ -222,11 +313,17 @@ class Processor:
             self.usb_key = usb_key
             self.usb_ready = False
             self.reconnect_pending = False
+            self.reader_identity = None
         usb_error = None
         was_ready = self.usb_ready
         if settings.enable_usb:
+            if any(reader_event_matches(path, self.reader_identity) for path in device_events):
+                self.reconnect_pending = True
             try:
-                self.probe()
+                identity = self.probe()
+                if self.reader_identity is not None and identity != self.reader_identity:
+                    self.reconnect_pending = True
+                self.reader_identity = identity
                 self.usb_ready = True
             except Exception as exc:
                 self.usb_ready = False
@@ -234,6 +331,9 @@ class Processor:
             if self.usb_ready and not was_ready:
                 self.reconnect_pending = True
                 log("mooInk USB 已連線，強制重新轉圖及更新")
+            on_connection("mooInk USB：已連線" if self.usb_ready else "mooInk USB：等待連線")
+        else:
+            on_connection("mooInk USB：自動更新未啟用")
         # Keep the reconnect request until a verified transfer completes.
         force = force or (self.usb_ready and self.reconnect_pending)
         if not scheduled and not force:
@@ -243,25 +343,27 @@ class Processor:
         src, dst = settings.paths()
         if not src.is_file():
             return "等待 " + src.name
+        source_stat = src.stat()
         digest = sha256(src)
         record = self.rendered.get(key)
         current = (isinstance(record, dict) and record.get("source") == digest
-                   and isinstance(record.get("word_mtime"), (int, float))
+                   and record.get("word_mtime_ns") == source_stat.st_mtime_ns
                    and dst.is_file() and record.get("png") == sha256(dst))
-        if force or not current:
+        rendered_now = force or not current
+        if rendered_now:
             with tempfile.TemporaryDirectory(prefix="mooink_source_") as directory:
                 snapshot = Path(directory) / src.name
-                source_stat = src.stat()
                 shutil.copyfile(src, snapshot)
                 if (sha256(snapshot) != digest or sha256(src) != digest
                         or src.stat().st_mtime_ns != source_stat.st_mtime_ns):
                     return "Word 正在儲存，稍後重試"
                 log("正在轉換 " + src.name)
                 self.render(snapshot, dst, settings.size)
-            if sha256(src) != digest:
+            if sha256(src) != digest or src.stat().st_mtime_ns != source_stat.st_mtime_ns:
                 return "Word 已再更新，稍後重試最新版本"
             record = {"source": digest, "png": sha256(dst),
-                      "word_mtime": source_stat.st_mtime}
+                      "word_mtime": source_stat.st_mtime,
+                      "word_mtime_ns": source_stat.st_mtime_ns}
             self.rendered[key] = record
             write_json(self.state_path, self.rendered)
             log("本機 PNG 已輸出：" + dst.name)
@@ -281,17 +383,21 @@ class Processor:
             except Exception:
                 self.usb_ready = False
                 self.reconnect_pending = True
+                on_connection("mooInk USB：傳送失敗，等待重試")
                 raise
-            if result["changed"] or force:
+            if result["changed"] or rendered_now:
                 on_success({"updated_at": time.time(), "word_mtime": record["word_mtime"],
                             "word_name": src.name, "png_name": dst.name,
                             "png_bytes": snapshot.read_bytes()})
         self.reconnect_pending = False
         if sha256(src) != digest or sha256(dst) != record["png"]:
             return "檔案已更新，暫不喚醒；稍後重試"
-        if not result["changed"] and not force:
+        if not result["changed"] and not rendered_now:
             return "無更新：sleep/" + dst.name + " 已回讀驗證"
-        wake_result = self.wake(settings.pico_port, log)
+        try:
+            wake_result = self.wake(settings.pico_port, log) if settings.pico_port else "未設定 Pico，略過 Space"
+        except Exception as exc:
+            wake_result = "Pico 不可用，略過 Space：" + str(exc)
         log(wake_result)
         return "USB sleep/" + dst.name + " 已回讀驗證；" + wake_result + "；請觀察休眠畫面"
 
@@ -314,10 +420,15 @@ def main():
     root.resizable(False, False)
     events = queue.Queue()
     stop, trigger = threading.Event(), threading.Event()
+    hotplug_events = queue.Queue()
+    def notify_device(path):
+        hotplug_events.put(path)
+        trigger.set()
     settings_lock = threading.Lock()
     operation_lock = threading.Lock()  # serialize USB and manual Space
     force_pending = False
     status_text = tk.StringVar(value="等待首次檢查")
+    connection_text = tk.StringVar(value="mooInk USB：偵測中")
     processor = Processor()
     success_text = tk.StringVar(value="尚無已驗證的 USB 更新")
     word_text = tk.StringVar(value="使用的 Word：—")
@@ -342,6 +453,12 @@ def main():
             with settings_lock:
                 current, force = settings, force_pending
                 force_pending = False
+            paths = []
+            while True:
+                try:
+                    paths.append(hotplug_events.get_nowait())
+                except queue.Empty:
+                    break
             scheduled = (current != previous_settings or time.monotonic() >= next_check)
             previous_settings = current
             if scheduled:
@@ -355,7 +472,9 @@ def main():
                     initialized.add(directory)
                 with operation_lock:
                     result = processor.check(current, force, publish, scheduled=scheduled,
-                        on_success=lambda data: events.put(("success", data)))
+                        on_success=lambda data: events.put(("success", data)),
+                        on_connection=lambda status: events.put(("connection", status)),
+                        device_events=paths)
             except Exception as exc:
                 result = "失敗，下次重試：" + str(exc)
             if result is not None and (result != previous or force):
@@ -383,6 +502,7 @@ def main():
     ttk.Checkbutton(frame,text="啟用 USB 自動更新 sleep 圖片",
                     variable=enable_usb).grid(row=4,column=0,columnspan=3,sticky="w",pady=5)
     ttk.Label(frame,text="依尺寸產生 mooink_display_10 / 13 的 PNG。\nUSB MTP 備份舊同名 PNG → 上傳 → SHA-256 回讀驗證 → Pico Space（選用）。\n只接一台 mooInk，並將同名 PNG 設為休眠圖。",wraplength=530).grid(row=6,column=0,columnspan=3,sticky="w",pady=8)
+    ttk.Label(frame,textvariable=connection_text).grid(row=5,column=0,columnspan=3,sticky="w")
     ttk.Label(frame,textvariable=status_text,wraplength=550).grid(row=7,column=0,columnspan=3,sticky="w",pady=5)
     def save():
         nonlocal settings, force_pending
@@ -470,6 +590,8 @@ def main():
                 break
             if action=="status":
                 status_text.set(value)
+            elif action=="connection":
+                connection_text.set(value)
             elif action=="success":
                 fmt = lambda stamp: datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M:%S")
                 success_text.set("成功更新：" + fmt(value["updated_at"]) + "  " + value["png_name"])
@@ -526,6 +648,8 @@ def main():
         root.after(150,drain)
     threading.Thread(target=tray.run,daemon=True).start()
     thread.start()
+    threading.Thread(target=watch_device_events, args=(stop, notify_device, logger.info),
+                     daemon=True).start()
     if not CONFIG.exists() or not settings.enable_usb:
         root.deiconify()
     root.after(150,drain)

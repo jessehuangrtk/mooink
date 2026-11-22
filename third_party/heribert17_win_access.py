@@ -3,7 +3,8 @@
 # Upstream Git blob: f4beae68f68c591722905364745d92000ab896d6
 # License: MIT, copyright (c) 2023 Heribert Füchtenhans.
 # License text: third_party/heribert17_wpd_LICENSE
-# This snapshot is unmodified apart from this attribution header.
+# Local changes: refresh WPD discovery on every call; keep COM objects local
+# to their owning apartment and balance the per-device COM initialization.
 """
 A module to access Mobile Devices from Windows via USB connection.
 Implements access to basic functions of the Windows WPD API
@@ -178,8 +179,6 @@ WPD_CONTENT_TYPE_DEVICE = 3
 WPD_DELETE_NO_RECURSION = 0
 WPD_DELETE_WITH_RECURSION = 1
 
-# Module variables
-DEVICE_MANAGER: Any | None = None
 
 
 # -------------------------------------------------------------------------------------------------
@@ -242,29 +241,29 @@ class PortableDeviceContent:
         self._serialnumber: str = ""
         self._port_device = device
         self._properties = properties or content.properties()  # pyright: ignore[reportAttributeAccessIssue]
-        if PortableDeviceContent._properties_to_read is None:
+        if device._properties_to_read is None:
             # We haven't set the properties wie will read, so do it now
-            PortableDeviceContent._properties_to_read = comtypes.client.CreateObject(
+            device._properties_to_read = comtypes.client.CreateObject(
                 types.PortableDeviceKeyCollection,  # pyright: ignore[reportAttributeAccessIssue]
                 clsctx=comtypes.CLSCTX_INPROC_SERVER,
                 interface=port.IPortableDeviceKeyCollection,  # pyright: ignore[reportAttributeAccessIssue]
             )
-            PortableDeviceContent._properties_to_read.Add(  # pyright: ignore[reportOptionalMemberAccess]
+            device._properties_to_read.Add(  # pyright: ignore[reportOptionalMemberAccess]
                 WPD_OBJECT_NAME
             )
-            PortableDeviceContent._properties_to_read.Add(  # pyright: ignore[reportOptionalMemberAccess]
+            device._properties_to_read.Add(  # pyright: ignore[reportOptionalMemberAccess]
                 WPD_OBJECT_ORIGINAL_FILE_NAME
             )
-            PortableDeviceContent._properties_to_read.Add(  # pyright: ignore[reportOptionalMemberAccess]
+            device._properties_to_read.Add(  # pyright: ignore[reportOptionalMemberAccess]
                 WPD_OBJECT_CONTENT_TYPE
             )
-            PortableDeviceContent._properties_to_read.Add(  # pyright: ignore[reportOptionalMemberAccess]
+            device._properties_to_read.Add(  # pyright: ignore[reportOptionalMemberAccess]
                 WPD_OBJECT_SIZE
             )
-            PortableDeviceContent._properties_to_read.Add(  # pyright: ignore[reportOptionalMemberAccess]
+            device._properties_to_read.Add(  # pyright: ignore[reportOptionalMemberAccess]
                 WPD_OBJECT_DATE_MODIFIED
             )
-            PortableDeviceContent._properties_to_read.Add(  # pyright: ignore[reportOptionalMemberAccess]
+            device._properties_to_read.Add(  # pyright: ignore[reportOptionalMemberAccess]
                 WPD_DEVICE_SERIAL_NUMBER
             )
         self._get_properties()
@@ -273,7 +272,7 @@ class PortableDeviceContent:
         self,
     ) -> None:
         """Sets the properties of this content."""
-        propvalues = self._properties.GetValues(self._object_id, PortableDeviceContent._properties_to_read)
+        propvalues = self._properties.GetValues(self._object_id, self._port_device._properties_to_read)
         self.content_type = WPD_CONTENT_TYPE_UNDEFINED
         try:
             self._plain_name = str(propvalues.GetStringValue(WPD_OBJECT_NAME))
@@ -682,15 +681,17 @@ class PortableDevice:
     # Class variable
     _properties_to_read: types.PortableDeviceKeyCollection | None = None  # pyright: ignore[reportAttributeAccessIssue]
 
-    def __init__(self, p_id: str) -> None:
+    def __init__(self, p_id: str, manager) -> None:
         """Init the class.
 
         Parameters:
             p_id: ID of the found device
         """
         self._p_id = p_id
+        self._properties_to_read = None  # never share COM collections across sessions
+        self._closed = False
         self._set_device()
-        self.name, self.description = self._get_description()
+        self.name, self.description = self._get_description(manager)
         # Get the serialnumber
         self._pdc = PortableDeviceContent(ctypes.c_wchar_p("DEVICE"), self._device.Content(), self, None)
         self.serialnumber = self._pdc._serialnumber
@@ -701,9 +702,18 @@ class PortableDevice:
 
     def close(self) -> None:
         """Close the connection to the device. This must be called when the device is no more needed."""
-        comtypes.CoUninitialize()
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._device.Close()
+        finally:
+            self._pdc = None
+            self._properties_to_read = None
+            self._device = None
+            comtypes.CoUninitialize()
 
-    def _get_description(self) -> tuple[str, str]:
+    def _get_description(self, manager) -> tuple[str, str]:
         """Get the name and the description of the device. If no description is available
         name and description will be identical.
 
@@ -716,21 +726,19 @@ class PortableDevice:
             >>> dev[0]._get_description()
             ('Nokia 6', 'Nokia 6')
         """
-        if DEVICE_MANAGER is None:
-            return "", ""
         name_len = ctypes.pointer(ctypes.c_ulong(0))
-        DEVICE_MANAGER.GetDeviceDescription(self._p_id, ctypes.POINTER(ctypes.c_ushort)(), name_len)
+        manager.GetDeviceDescription(self._p_id, ctypes.POINTER(ctypes.c_ushort)(), name_len)
         name = ctypes.create_unicode_buffer(name_len.contents.value)
-        DEVICE_MANAGER.GetDeviceDescription(
+        manager.GetDeviceDescription(
             self._p_id,
             ctypes.cast(name, ctypes.POINTER(ctypes.c_ushort)),
             name_len,
         )
         self._desc = name.value
         try:
-            DEVICE_MANAGER.GetDeviceFriendlyName(self._p_id, ctypes.POINTER(ctypes.c_ushort)(), name_len)
+            manager.GetDeviceFriendlyName(self._p_id, ctypes.POINTER(ctypes.c_ushort)(), name_len)
             name = ctypes.create_unicode_buffer(name_len.contents.value)
-            DEVICE_MANAGER.GetDeviceFriendlyName(
+            manager.GetDeviceFriendlyName(
                 self._p_id,
                 ctypes.cast(name, ctypes.POINTER(ctypes.c_ushort)),
                 name_len,
@@ -800,30 +808,45 @@ def get_portable_devices() -> list[PortableDevice]:
         >>> len(devs) == 1
         True
     """
-    global DEVICE_MANAGER
-
+    # A manager enumerates a snapshot. A global COM pointer also becomes
+    # invalid when the first worker's apartment is uninitialized.
+    manager = None
+    devices = []
+    comtypes.CoInitialize()
     try:
-        if DEVICE_MANAGER is None:
-            comtypes.CoInitialize()
-            DEVICE_MANAGER = comtypes.client.CreateObject(
-                port.PortableDeviceManager,  # pyright: ignore[reportAttributeAccessIssue]
-                clsctx=comtypes.CLSCTX_INPROC_SERVER,
-                interface=port.IPortableDeviceManager,  # pyright: ignore[reportAttributeAccessIssue]
-            )
-        if DEVICE_MANAGER is None:
-            raise OSError("Error initialising Windows PortableDeviceManager")
-        pnp_device_id_count = ctypes.pointer(ctypes.c_ulong(0))
-        DEVICE_MANAGER.GetDevices(ctypes.POINTER(ctypes.c_wchar_p)(), pnp_device_id_count)
-        if pnp_device_id_count.contents.value == 0:
-            return []
-        pnp_device_ids = (ctypes.c_wchar_p * pnp_device_id_count.contents.value)()
-        DEVICE_MANAGER.GetDevices(
-            ctypes.cast(pnp_device_ids, ctypes.POINTER(ctypes.c_wchar_p)),
-            pnp_device_id_count,
+        manager = comtypes.client.CreateObject(
+            port.PortableDeviceManager,
+            clsctx=comtypes.CLSCTX_INPROC_SERVER,
+            interface=port.IPortableDeviceManager,
         )
-        return [PortableDevice(cur_id) for cur_id in pnp_device_ids if cur_id is not None]
-    except comtypes.COMError as err:  # pyright: ignore[reportAttributeAccessIssue]
-        raise OSError(f"Error getting list of devices: {err.args[1]}")
+        manager.RefreshDeviceList()
+        count = ctypes.pointer(ctypes.c_ulong(0))
+        manager.GetDevices(ctypes.POINTER(ctypes.c_wchar_p)(), count)
+        if not count.contents.value:
+            return []
+        ids = (ctypes.c_wchar_p * count.contents.value)()
+        manager.GetDevices(ctypes.cast(ids, ctypes.POINTER(ctypes.c_wchar_p)), count)
+        for p_id in ids:
+            if p_id is None:
+                continue
+            # Every returned device owns exactly one COM initialization.
+            comtypes.CoInitialize()
+            try:
+                devices.append(PortableDevice(p_id, manager))
+            except BaseException:
+                comtypes.CoUninitialize()
+                raise
+        return devices
+    except BaseException as err:
+        for device in devices:
+            with contextlib.suppress(Exception):
+                device.close()
+        if isinstance(err, comtypes.COMError):
+            raise OSError(f"Error getting list of devices: {err}") from err
+        raise
+    finally:
+        manager = None
+        comtypes.CoUninitialize()
 
 
 def get_content_from_device_path(dev: PortableDevice, path: str) -> PortableDeviceContent | None:

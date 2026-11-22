@@ -379,3 +379,19 @@ class WatchImageReplacementTests(unittest.TestCase):
                                     device_source=lambda:[dev,FakeDevice("mooInk 2")])
             self.assertEqual(other.remove_count,0)
             self.assertEqual(len(sleep.children),1)
+
+
+class ReaderProbeTests(unittest.TestCase):
+    def test_reader_probe_validates_sleep_and_closes_session(self):
+        from mook_mtp_wpd import probe_reader
+        device, _, _ = make_device(png_data())
+        device._p_id = "reader-id"
+        self.assertEqual(probe_reader(device_source=lambda: [device]), "reader-id")
+        self.assertTrue(device.closed)
+
+    def test_reader_probe_rejects_missing_sleep(self):
+        from mook_mtp_wpd import probe_reader
+        device = FakeDevice()
+        with self.assertRaises(QuietMtpUnavailable):
+            probe_reader(device_source=lambda: [device])
+        self.assertTrue(device.closed)

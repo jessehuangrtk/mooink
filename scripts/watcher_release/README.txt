@@ -35,11 +35,13 @@ Windows Explorer before enabling USB updates. No Git or WSL is required on
 the target PC. Python itself and Office/LibreOffice are not bundled.
 
 USB hot-plug: while USB automatic update is enabled, WPD readiness is checked
-approximately every 2 seconds, independently of the Word check interval.
+approximately every 1 second, independently of the Word check interval.
 On detection of a reader after an offline state, the current Word file is
 rendered again and the reserved sleep PNG is uploaded or SHA-256 verified,
 even when the Word file is unchanged. Pico is optional. The settings window
 shows the last USB-verified update time, source Word modification time and
 preview from the actual transferred/verified PNG, not a later local render.
-Very brief disconnects between polls may not be detected. WPD operations can
+Windows WPD device arrival/removal notifications also trigger an immediate check.
+If notifications are unavailable, very brief disconnects between polls can be missed.
+WPD operations can
 take longer than the poll interval. Physical screen refresh is not verified.

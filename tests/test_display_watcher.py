@@ -168,7 +168,7 @@ class WatcherTests(unittest.TestCase):
             p.check(s, scheduled=False, on_success=delivered.append)
             self.assertEqual(render.call_count, 2)
             self.assertEqual(upload.call_count, 1)
-            self.assertEqual(wake.call_count, 1)
+            wake.assert_not_called()  # explicitly disabled Pico
             self.assertEqual(delivered[0]["png_bytes"], b"png")
             self.assertEqual(delivered[0]["word_mtime"], src.stat().st_mtime)
             self.assertIsNone(p.check(s, scheduled=False, on_success=delivered.append))
@@ -198,3 +198,42 @@ class WatcherTests(unittest.TestCase):
             p.check(s, scheduled=False, on_success=delivered)
             delivered.assert_called_once()
             wake.assert_called_once()
+
+
+    def test_quick_replug_event_forces_update_with_same_identity(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            s = Settings(watch_dir=tmp, enable_usb=True)
+            s.paths()[0].write_bytes(b"Word")
+            render = Mock(side_effect=lambda src,dst,size: dst.write_bytes(b"png"))
+            upload = Mock(return_value={"changed": False})
+            wake = Mock(side_effect=OSError("Pico removed"))
+            path = r"\\?\usb#vid_1f85&pid_4e16#reader#{guid}"
+            p = Processor(Path(tmp)/"state.json", render, upload, wake, lambda: path)
+            delivered = []
+            p.check(s, on_success=delivered.append)
+            self.assertIsNone(p.check(s, scheduled=False, device_events=["pico"]))
+            self.assertIn("已回讀驗證", p.check(s, scheduled=False,
+                device_events=[path], on_success=delivered.append))
+            self.assertEqual(render.call_count, 2)
+            self.assertEqual(len(delivered), 2)
+            self.assertEqual(wake.call_count, 2)
+
+    def test_changed_word_with_same_png_updates_word_timestamp(self):
+        from unittest.mock import Mock
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            s = Settings(watch_dir=tmp, enable_usb=True, pico_port="")
+            source = s.paths()[0]
+            source.write_bytes(b"Word")
+            p = Processor(Path(tmp)/"state.json",
+                          lambda src,dst,size: dst.write_bytes(b"same png"),
+                          Mock(return_value={"changed": False}), Mock(), lambda: "reader")
+            delivered = []
+            p.check(s, on_success=delivered.append)
+            stamp = source.stat().st_mtime + 100
+            os.utime(source, (stamp, stamp))
+            p.check(s, on_success=delivered.append)
+            self.assertEqual(len(delivered), 2)
+            self.assertEqual(delivered[-1]["word_mtime"], source.stat().st_mtime)
+            p.wake.assert_not_called()

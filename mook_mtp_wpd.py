@@ -468,3 +468,20 @@ def list_images(*, device_source=None):
                     close()
                 except Exception:
                     pass
+
+
+def probe_reader(*, device_source=None):
+    """Return the identity of a unique, MTP-ready reader, not a cached USB flag."""
+    devices = _get_device_list() if device_source is None else list(device_source())
+    try:
+        device = _choose_device(devices)
+        _sleep_directory(device)
+        return str(getattr(device, "_p_id", "") or _device_name(device))
+    finally:
+        for device in devices:
+            close = getattr(device, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
