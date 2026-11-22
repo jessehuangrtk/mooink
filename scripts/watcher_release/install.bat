@@ -20,7 +20,7 @@ if exist "wheelhouse\" (
   "%VPY%" -m pip install -r requirements.txt || goto failed
 )
 "%VPY%" -m pip check || goto failed
-"%VPY%" -c "import tkinter, PIL, pymupdf, pythoncom, win32com.client, win32gui, win32api, win32con, comtypes, serial, pystray; import mooink_display_watcher, mook_mtp_wpd, pico2w_usb2bluetooth; from third_party.heribert17_win_access import get_portable_devices" || goto failed
+"%VPY%" -c "import tkinter, PIL, pymupdf, pythoncom, win32com.client, win32gui, win32api, win32con, comtypes, serial, pystray; import mooink_display_watcher, mooink_multi_device, mook_mtp_wpd, pico2w_usb2bluetooth; from third_party.heribert17_win_access import get_portable_devices" || goto failed
 "%VPY%" mooink_display_watcher.py --init-templates || goto failed
 echo.
 echo [OK] Installation complete. Run start.bat.

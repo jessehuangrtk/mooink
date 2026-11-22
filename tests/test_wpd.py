@@ -395,3 +395,59 @@ class ReaderProbeTests(unittest.TestCase):
         with self.assertRaises(QuietMtpUnavailable):
             probe_reader(device_source=lambda: [device])
         self.assertTrue(device.closed)
+
+
+class MultipleReaderTests(unittest.TestCase):
+    def test_two_identical_named_readers_have_distinct_ids(self):
+        from mook_mtp_wpd import list_readers
+        d1, _, _ = make_device(png_data())
+        d2, _, _ = make_device(png_data())
+        d1._p_id = r"USB\\VID_1F85&PID_4E16\\SERIAL_A"
+        d2._p_id = r"USB\\VID_1F85&PID_4E16\\SERIAL_B"
+        rows = list_readers(device_source=lambda: [d1, d2])
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["ready"] for row in rows))
+        self.assertEqual(len({row["id"] for row in rows}), 2)
+        self.assertTrue(d1.closed and d2.closed)
+
+    def test_targeted_write_does_not_touch_other_reader(self):
+        from mook_mtp_wpd import _reader_id
+        d1, f1, old1 = make_device(png_data())
+        d2, f2, old2 = make_device(png_data())
+        d1._p_id = r"USB\\VID_1F85&PID_4E16\\SERIAL_A"
+        d2._p_id = r"USB\\VID_1F85&PID_4E16\\SERIAL_B"
+        before2 = [x.payload for x in f2.children]
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "mooink_display_10.png"
+            target.write_bytes(png_data())
+            result = replace_watch_image(target, Path(tmp)/"backups",
+                                         device_source=lambda: [d1, d2],
+                                         reader_id=_reader_id(d1))
+        self.assertTrue(result["changed"])
+        self.assertEqual([x.payload for x in f2.children], before2)
+        self.assertEqual(old2.remove_count, 0)
+        self.assertEqual(len(f1.children), 2)  # existing 001.png plus new reserved PNG
+        self.assertEqual(len(f2.children), 1)
+
+    def test_multi_without_target_must_refuse_write(self):
+        d1, _, _ = make_device(png_data())
+        d2, _, _ = make_device(png_data())
+        d1._p_id = "reader_a"
+        d2._p_id = "reader_b"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/"mooink_display_10.png"
+            path.write_bytes(png_data())
+            with self.assertRaises(QuietMtpUnavailable):
+                replace_watch_image(path,Path(tmp)/"backup",
+                                    device_source=lambda: [d1,d2])
+
+    def test_unknown_id_refuses_targeted_write(self):
+        d1, folder, _ = make_device(png_data())
+        d1._p_id = "reader_a"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/"mooink_display_10.png"
+            path.write_bytes(png_data())
+            with self.assertRaises(QuietMtpUnavailable):
+                replace_watch_image(path,Path(tmp)/"backup",
+                                    device_source=lambda:[d1], reader_id="0"*64)
+            self.assertEqual(len(folder.children), 1)

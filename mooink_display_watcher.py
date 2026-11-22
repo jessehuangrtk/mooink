@@ -21,6 +21,7 @@ from dataclasses import dataclass, asdict
 import uuid
 
 from mook_sleep_screen_manager import SleepScreenManager, RESOLUTIONS
+from mooink_multi_device import DeviceRegistry, MultiDeviceController
 
 CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "mooink"
 CONFIG = CONFIG_DIR / "mooink_display_watcher.json"
@@ -167,34 +168,45 @@ def render_png(source, output, size):
         if com is not None:
             com.CoUninitialize()
 
-def usb_upload(settings, source, log):
+def usb_upload(settings, source, log, reader_id=None):
     import pythoncom
     from mook_mtp_wpd import replace_watch_image
     pythoncom.CoInitialize()
     try:
         return replace_watch_image(
             source, CONFIG_DIR / "watcher_backup",
-            progress=lambda stage, detail: log(detail.get("message", stage)))
+            progress=lambda stage, detail: log(detail.get("message", stage)),
+            reader_id=reader_id)
     finally:
         pythoncom.CoUninitialize()
 
 
-def usb_list():
+def usb_list(reader_id=None):
     import pythoncom
     from mook_mtp_wpd import list_images
     pythoncom.CoInitialize()
     try:
-        return list_images()
+        return list_images(reader_id=reader_id)
     finally:
         pythoncom.CoUninitialize()
 
 
-def usb_probe():
+def usb_probe(reader_id=None):
     import pythoncom
     from mook_mtp_wpd import probe_reader
     pythoncom.CoInitialize()
     try:
-        return probe_reader()
+        return probe_reader(reader_id=reader_id)
+    finally:
+        pythoncom.CoUninitialize()
+
+
+def usb_readers():
+    import pythoncom
+    from mook_mtp_wpd import list_readers
+    pythoncom.CoInitialize()
+    try:
+        return list_readers()
     finally:
         pythoncom.CoUninitialize()
 
@@ -430,6 +442,17 @@ def main():
     status_text = tk.StringVar(value="等待首次檢查")
     connection_text = tk.StringVar(value="mooInk USB：偵測中")
     processor = Processor()
+    registry = DeviceRegistry(CONFIG_DIR / "mooink_device_sizes.json")
+    def make_reader_processor(reader_id):
+        return Processor(
+            state_path=CONFIG_DIR / ("watcher_" + reader_id + ".json"),
+            upload=lambda cfg, source, log: usb_upload(cfg, source, log, reader_id),
+            probe=lambda: usb_probe(reader_id=reader_id),
+            wake=pico_wake)
+    multiple = MultiDeviceController(registry, make_reader_processor,
+                                     usb_readers, reader_event_matches)
+    device_info = {}
+    device_status = {}
     success_text = tk.StringVar(value="尚無已驗證的 USB 更新")
     word_text = tk.StringVar(value="使用的 Word：—")
     icon = Image.new("RGB", (64,64), "white")
@@ -471,10 +494,17 @@ def main():
                         publish("已建立本機工作檔：" + "、".join(created))
                     initialized.add(directory)
                 with operation_lock:
-                    result = processor.check(current, force, publish, scheduled=scheduled,
-                        on_success=lambda data: events.put(("success", data)),
-                        on_connection=lambda status: events.put(("connection", status)),
-                        device_events=paths)
+                    if current.enable_usb:
+                        results = multiple.check(
+                            current, force=force, scheduled=scheduled, device_events=paths,
+                            log=publish,
+                            inventory=lambda rows: events.put(("inventory", rows)),
+                            status=lambda rid, msg: events.put(("device_status", (rid, msg))),
+                            success=lambda rid, data: events.put(("device_success", (rid, data))))
+                        result = results[-1] if results else "裝置掃描完成（未配對或無裝置）"
+                    else:
+                        result = processor.check(current, force, publish,
+                            scheduled=scheduled)
             except Exception as exc:
                 result = "失敗，下次重試：" + str(exc)
             if result is not None and (result != previous or force):
@@ -501,7 +531,7 @@ def main():
     enable_usb = tk.BooleanVar(value=settings.enable_usb)
     ttk.Checkbutton(frame,text="啟用 USB 自動更新 sleep 圖片",
                     variable=enable_usb).grid(row=4,column=0,columnspan=3,sticky="w",pady=5)
-    ttk.Label(frame,text="依尺寸產生 mooink_display_10 / 13 的 PNG。\nUSB MTP 備份舊同名 PNG → 上傳 → SHA-256 回讀驗證 → Pico Space（選用）。\n只接一台 mooInk，並將同名 PNG 設為休眠圖。",wraplength=530).grid(row=6,column=0,columnspan=3,sticky="w",pady=8)
+    ttk.Label(frame,text="依尺寸產生 mooink_display_10 / 13 的 PNG。\nUSB MTP 備份舊同名 PNG → 上傳 → SHA-256 回讀驗證 → Pico Space（選用）。\n可同時連接多台 mooInk，先以裝置 ID 配對尺寸。\n多裝置 USB 更新不會自動傳送 Pico Space。",wraplength=530).grid(row=6,column=0,columnspan=3,sticky="w",pady=8)
     ttk.Label(frame,textvariable=connection_text).grid(row=5,column=0,columnspan=3,sticky="w")
     ttk.Label(frame,textvariable=status_text,wraplength=550).grid(row=7,column=0,columnspan=3,sticky="w",pady=5)
     def save():
@@ -513,7 +543,7 @@ def main():
             new=Settings(**values).validate()
             if new.enable_usb and (not settings.enable_usb or new.size != settings.size):
                 if not messagebox.askyesno("啟用 USB 更新",
-                    "請只接一台 mooInk USB，並確認 Pico 配對同一台。\n"
+                    "可同時接多台 Mooink，每台需先以裝置 ID 指定尺寸。\n"
                     "將自動備份及替換 sleep 內專用同名 PNG；其他圖片不會刪除。確定啟用？",parent=root):
                     return
             write_json(CONFIG,asdict(new))
@@ -551,12 +581,21 @@ def main():
         def run():
             try:
                 with operation_lock:
-                    result = usb_list() if action == "list" else pico_wake(port, logger.info)
+                    if action in ("list", "pair"):
+                        readers = usb_readers()
+                        if action == "pair":
+                            result = readers
+                        else:
+                            result = [(reader, usb_list(reader["id"]) if reader["ready"] else [])
+                                      for reader in readers]
+                    else:
+                        result = pico_wake(port, logger.info)
                 events.put(("manual_result",(action,result,None)))
             except Exception as exc:
                 events.put(("manual_result",(action,None,str(exc))))
         threading.Thread(target=run,daemon=True).start()
-    for label, action in (("測試 USB／查詢 sleep","list"),("測試喚醒 Space","wake")):
+    for label, action in (("管理裝置／尺寸配對","pair"),
+                          ("測試 USB／查詢 sleep","list"),("測試喚醒 Space","wake")):
         button = ttk.Button(buttons,text=label,command=lambda a=action: manual_job(a))
         button.pack(side="left",padx=3)
         action_buttons.append(button)
@@ -568,8 +607,110 @@ def main():
     preview_box.grid(row=10,column=0,columnspan=3,sticky="ew",pady=5)
     ttk.Label(preview_box,textvariable=success_text,wraplength=550).pack(anchor="w")
     ttk.Label(preview_box,textvariable=word_text,wraplength=550).pack(anchor="w")
+    tree_columns = ("size", "state", "updated", "wordtime")
+    device_tree = ttk.Treeview(preview_box, columns=tree_columns, show="tree headings",
+                               height=5, selectmode="browse")
+    device_tree.heading("#0", text="裝置（ID 前 12 碼）")
+    device_tree.column("#0", width=170, stretch=False)
+    for column, label, width in (("size","尺寸",55), ("state","USB / 更新",165),
+                                 ("updated","成功時間",145), ("wordtime","Word 修改時間",145)):
+        device_tree.heading(column, text=label)
+        device_tree.column(column, width=width, stretch=False)
+    device_tree.pack(fill="x",pady=5)
     preview = ttk.Label(preview_box,text="尚無圖片")
     preview.pack(pady=4)
+
+    def stamp(value):
+        try:
+            return datetime.fromtimestamp(float(value)).strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError, OverflowError, OSError):
+            return "—"
+
+    def show_preview(device_id):
+        row = registry.lookup(device_id)
+        success_text.set("成功更新：" + stamp(row.get("last_updated")) +
+                         "  " + row.get("png_name", ""))
+        word_text.set("使用的 Word：" + row.get("word_name", "—") +
+                      "  修改時間 " + stamp(row.get("word_mtime")))
+        try:
+            path = registry.preview_file(device_id)
+            with Image.open(path) as image:
+                image.thumbnail((280, 340), Image.Resampling.LANCZOS)
+                preview.image = ImageTk.PhotoImage(image, master=root)
+            preview.configure(image=preview.image, text="")
+        except Exception:
+            preview.image = None
+            preview.configure(image="", text="尚無驗證成功的 PNG 預覽")
+
+    def populate_tree():
+        ids = set(device_info) | set(registry.entries())
+        for rid in sorted(ids):
+            info = device_info.get(rid, {})
+            meta = registry.lookup(rid)
+            values = (meta.get("size", "未配對"),
+                      device_status.get(rid, "已連線" if info.get("ready") else "未連線"),
+                      stamp(meta.get("last_updated")), stamp(meta.get("word_mtime")))
+            title = (info.get("name") or meta.get("name") or "mooInk") + " [" + rid[:12] + "]"
+            if device_tree.exists(rid):
+                device_tree.item(rid, text=title, values=values)
+            else:
+                device_tree.insert("", "end", iid=rid, text=title, values=values)
+
+    def on_select_device(event=None):
+        selection = device_tree.selection()
+        if selection:
+            show_preview(selection[0])
+    device_tree.bind("<<TreeviewSelect>>", on_select_device)
+    populate_tree()
+
+    def open_device_pairing(readers):
+        if not readers:
+            messagebox.showinfo("裝置配對", "目前未偵測到 Mooink。插入 USB 後再試一次。", parent=root)
+            return
+        dialog = tk.Toplevel(root)
+        dialog.title("依裝置 ID 設定尺寸")
+        dialog.geometry("650x315")
+        dialog.transient(root)
+        ttk.Label(dialog,text="每台裝置只需設定一次尺寸；之後依 ID 自動套用，不會寫入未配對的裝置。",
+                  wraplength=615).pack(anchor="w",padx=10,pady=8)
+        labels = [(r["name"] + "  ID " + r["id"][:16] +
+                   ("  [就緒]" if r["ready"] else "  [等待 WPD]")) for r in readers]
+        picker = ttk.Combobox(dialog, values=labels, width=75, state="readonly")
+        picker.pack(padx=10,pady=6,fill="x")
+        selected_size = tk.StringVar(value="")
+        line = ttk.Frame(dialog)
+        line.pack(anchor="w",padx=10,pady=8)
+        ttk.Label(line, text="此 ID 的 mooInk 尺寸：").pack(side="left")
+        sizing = ttk.Combobox(line, textvariable=selected_size,
+                              values=("10.3","13.3"), width=10, state="readonly")
+        sizing.pack(side="left",padx=5)
+        ttk.Label(dialog, text="無法由裝置 ID 推算面板尺寸。請依實際機型選擇後儲存。",
+                  foreground="#994400").pack(anchor="w",padx=10)
+        def selected(event=None):
+            index = picker.current()
+            if index >= 0:
+                selected_size.set(registry.lookup(readers[index]["id"]).get("size", ""))
+        picker.bind("<<ComboboxSelected>>", selected)
+        picker.current(0)
+        selected()
+        def assign():
+            nonlocal force_pending
+            index = picker.current()
+            if index < 0 or not selected_size.get():
+                messagebox.showwarning("裝置配對", "請選擇尺寸", parent=dialog)
+                return
+            r = readers[index]
+            try:
+                registry.assign(r["id"], selected_size.get(), r["name"])
+            except Exception as exc:
+                messagebox.showerror("配對失敗", str(exc), parent=dialog)
+                return
+            with settings_lock:
+                force_pending = True
+            trigger.set()
+            populate_tree()
+            dialog.destroy()
+        ttk.Button(dialog,text="儲存此裝置尺寸",command=assign).pack(pady=14)
 
     root.protocol("WM_DELETE_WINDOW",root.withdraw)
     def tray_action(action):
@@ -592,19 +733,24 @@ def main():
                 status_text.set(value)
             elif action=="connection":
                 connection_text.set(value)
+            elif action=="inventory":
+                device_info.clear()
+                device_info.update({reader["id"]: reader for reader in value})
+                connection_text.set("已連接 Mooink：" + str(sum(1 for r in value if r["ready"])) + " 台")
+                populate_tree()
+            elif action=="device_status":
+                rid, msg = value
+                device_status[rid] = msg
+                populate_tree()
+            elif action=="device_success":
+                rid, result = value
+                populate_tree()
+                device_tree.selection_set(rid)
+                device_tree.see(rid)
+                show_preview(rid)
             elif action=="success":
-                fmt = lambda stamp: datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M:%S")
-                success_text.set("成功更新：" + fmt(value["updated_at"]) + "  " + value["png_name"])
-                word_text.set("使用的 Word：" + value["word_name"] + "  " + fmt(value["word_mtime"]))
-                try:
-                    with Image.open(io.BytesIO(value["png_bytes"])) as image:
-                        image.thumbnail((280, 340), Image.Resampling.LANCZOS)
-                        preview.image = ImageTk.PhotoImage(image, master=root)
-                    preview.configure(image=preview.image, text="")
-                except Exception as exc:
-                    preview.image = None
-                    preview.configure(image="", text="圖片預覽失敗：" + str(exc))
-                    logger.exception("Preview failed")
+                # Legacy one-device renderer compatibility (USB disabled).
+                pass
             elif action=="manual_result":
                 operation, result, error = value
                 manual_busy = False
@@ -617,16 +763,23 @@ def main():
                 elif operation == "wake":
                     usb_status.set(result)
                     logger.info("Pico 手動喚醒：%s", result)
+                elif operation == "pair":
+                    open_device_pairing(result)
                 else:
-                    usb_status.set("USB 連線成功；sleep 內 %d 張圖片" % len(result))
+                    usb_status.set("偵測到 %d 台 Mooink" % len(result))
                     dialog = tk.Toplevel(root)
-                    dialog.title("USB mooInk sleep 圖片清單")
-                    dialog.geometry("600x420")
+                    dialog.title("USB Mooink sleep 圖片清單")
+                    dialog.geometry("650x420")
                     listing = tk.Text(dialog,wrap="none")
                     listing.pack(fill="both",expand=True,padx=8,pady=8)
-                    listing.insert("1.0","\n".join(
-                        "%s   %s bytes" % (row["name"],row.get("size") or "?")
-                        for row in result) or "（沒有圖片）")
+                    lines = []
+                    for reader, files in result:
+                        lines.append("%s  [ID %s]  %s" %
+                            (reader["name"], reader["id"][:12],
+                             "已就緒" if reader["ready"] else "WPD 未就緒"))
+                        lines.extend("  %s   %s bytes" % (row["name"], row.get("size") or "?")
+                                     for row in files)
+                    listing.insert("1.0","\n".join(lines) or "（未找到 Mooink）")
                     listing.configure(state="disabled")
             elif action=="settings":
                 root.deiconify()

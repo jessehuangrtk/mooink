@@ -54,3 +54,15 @@ folder. Stop the old watcher, back up or rename that folder before rebuilding,
 and copy your edited working Word files into the new folder if needed.
 Check the saved watch directory in settings after moving the folder.
 release_commit.txt identifies the source Git revision when Git is available.
+
+MULTI-DEVICE SIZE PROFILE
+Each reader's WPD/PnP ID is SHA-256 fingerprinted and saved with its size in
+%LOCALAPPDATA%\mooink\mooink_device_sizes.json. The profile includes the last
+verified transfer time and the modification time of the Word used. Verified
+PNG previews are saved under %LOCALAPPDATA%\mooink\verified_previews\.
+The UI displays connected and remembered devices. If a reader's WPD ID changes
+(e.g. Windows gives a new instance ID after a USB port change), pair it again.
+No identification from physical screen size is attempted; an unpaired reader
+requires an explicit size selection, which avoids accidentally sending a
+13.3-inch PNG to a 10.3-inch reader. Multiple same-model readers are supported.
+Automatic Pico Space is disabled in multi-device mode; USB MTP still works.

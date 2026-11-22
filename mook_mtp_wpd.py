@@ -75,23 +75,36 @@ def _device_name(device):
     return str(getattr(device, "devicename", "") or "").strip()
 
 
-def _choose_device(devices):
-    # Name can be "Digital Paper" instead of mooInk. A specific first-gen
-    # reader was observed with USB VID_1F85/PID_4E16; device._p_id is the
-    # upstream mtp.win_access PortableDevice WPD/PnP device identifier.
-    # Requiring exactly one match still prevents cross-device writes.
-    def known_reader(dev):
-        name = _device_name(dev).casefold()
-        pnp = str(getattr(dev, "_p_id", "") or "").casefold()
-        return (
-            "mooink" in name or "readmoo" in name
-            or ("vid_1f85" in pnp and "pid_4e16" in pnp)
-        )
-    matches = [dev for dev in devices if known_reader(dev)]
+def _known_reader(dev):
+    # Sony-based first-gen devices sometimes report only "Digital Paper".
+    name = _device_name(dev).casefold()
+    pnp = str(getattr(dev, "_p_id", "") or "").casefold()
+    return ("mooink" in name or "readmoo" in name
+            or ("vid_1f85" in pnp and "pid_4e16" in pnp))
+
+
+def _reader_id(dev):
+    """Opaque, reproducible per-device ID from Windows WPD/PnP identity.
+
+    Never fall back to a model name: two identical readers must not share an ID.
+    Windows may assign a new PnP ID after a USB port change on devices without
+    an embedded serial number, in which case a new pairing is required.
+    """
+    pnp = str(getattr(dev, "_p_id", "") or "").strip().casefold()
+    if not pnp:
+        raise QuietMtpUnavailable("裝置缺少 Windows WPD 唯一 ID，拒絕自動配對")
+    return hashlib.sha256(pnp.encode("utf-8")).hexdigest()
+
+
+def _choose_device(devices, reader_id=None):
+    """Select exactly one known reader, optionally locked to its persistent ID."""
+    matches = [dev for dev in devices if _known_reader(dev)]
+    if reader_id is not None:
+        matches = [dev for dev in matches if _reader_id(dev) == reader_id]
     if len(matches) != 1:
         raise QuietMtpUnavailable(
-            "WPD 找不到唯一的 mooInk/Readmoo 裝置（符合 %d 台，全部 %d 台）。"
-            "為安全起見不進行刪除，也不改用 Windows 逐張提示。"
+            "WPD 找不到唯一的指定 mooInk 裝置（符合 %d 台，全部 %d 台）。"
+            "不進行刪除或寫入；請確認裝置 ID 與連線。"
             % (len(matches), len(devices))
         )
     return matches[0]
@@ -363,7 +376,7 @@ def _upload_to_sleep(sleep, path, progress=None):
 WATCH_NAMES = frozenset(("mooink_display_10.png", "mooink_display_13.png"))
 
 
-def replace_watch_image(source, backup_dir, *, progress=None, device_source=None):
+def replace_watch_image(source, backup_dir, *, progress=None, device_source=None, reader_id=None):
     """Replace only a reserved watcher image on one reader, in one WPD session.
 
     Existing image is downloaded and validated before deletion. An identical
@@ -379,7 +392,7 @@ def replace_watch_image(source, backup_dir, *, progress=None, device_source=None
     devices = _get_device_list() if device_source is None else list(device_source())
     backup = None
     try:
-        sleep = _sleep_directory(_choose_device(devices))
+        sleep = _sleep_directory(_choose_device(devices, reader_id=reader_id))
         def matches():
             return [obj for obj in sleep.get_children()
                     if str(getattr(obj, "name", "")).casefold() == path.name.casefold()]
@@ -440,14 +453,14 @@ def replace_watch_image(source, backup_dir, *, progress=None, device_source=None
                     pass
 
 
-def list_images(*, device_source=None):
+def list_images(*, device_source=None, reader_id=None):
     """List JPG/PNG files directly from WPD after a verified upload."""
     if device_source is None:
         devices = _get_device_list()
     else:
         devices = list(device_source())
     try:
-        sleep = _sleep_directory(_choose_device(devices))
+        sleep = _sleep_directory(_choose_device(devices, reader_id=reader_id))
         output = []
         for item in sleep.get_children():
             name = str(getattr(item, "name", ""))
@@ -470,13 +483,50 @@ def list_images(*, device_source=None):
                     pass
 
 
-def probe_reader(*, device_source=None):
+def probe_reader(*, device_source=None, reader_id=None):
     """Return the identity of a unique, MTP-ready reader, not a cached USB flag."""
     devices = _get_device_list() if device_source is None else list(device_source())
     try:
-        device = _choose_device(devices)
+        device = _choose_device(devices, reader_id=reader_id)
         _sleep_directory(device)
         return str(getattr(device, "_p_id", "") or _device_name(device))
+    finally:
+        for device in devices:
+            close = getattr(device, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
+
+def list_readers(*, device_source=None):
+    """Discover all supported readers without writing anything.
+
+    A reader is eligible for MTP transfer only when its sleep folder is ready.
+    The fingerprint is used for per-device size mapping; no device is selected
+    on the basis of its name or enumeration order.
+    """
+    devices = _get_device_list() if device_source is None else list(device_source())
+    try:
+        output = []
+        for dev in devices:
+            if not _known_reader(dev):
+                continue
+            try:
+                key = _reader_id(dev)
+            except QuietMtpUnavailable:
+                continue
+            try:
+                _sleep_directory(dev)
+                ready = True
+            except (OSError, RuntimeError, ValueError):
+                ready = False
+            output.append({"id": key, "name": _device_name(dev), "ready": ready,
+                           "pnp": str(getattr(dev, "_p_id", "") or "")})
+        if len({reader["id"] for reader in output}) != len(output):
+            raise QuietMtpUnavailable("WPD 裝置 ID 重複，拒絕自動更新")
+        return sorted(output, key=lambda row: (row["name"].casefold(), row["id"]))
     finally:
         for device in devices:
             close = getattr(device, "close", None)
