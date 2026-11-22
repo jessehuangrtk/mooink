@@ -189,13 +189,14 @@ def pico_wake(port, log):
     if not port:
         return "未設定 Pico，略過 Space"
     try:
-        from pico2w_usb2bluetooth import send_text, ports
+        from pico2w_usb2bluetooth import send_space, ports
         if not any(p.device.casefold() == port.casefold() for p in ports()):
             return "找不到 " + port + "，略過 Space"
-        send_text(port, " ")
-        return "Space 已寫入 CDC；藍牙傳送與實際喚醒尚待確認"
+        log("Pico " + port + "：直接傳送 ASCII 0x20（Space）")
+        send_space(port)
+        return "Space 已送出且 CDC 回顯一致；實際喚醒仍須觀察"
     except Exception as exc:
-        return "Pico 喚醒略過：" + str(exc)
+        return "Pico Space 傳送未確認：" + str(exc)
 
 class Processor:
     """Persist local renders, verify the attached reader before each update."""
@@ -312,7 +313,7 @@ def main():
     for index,(name,label) in enumerate([
         ("watch_dir","監控資料夾"), ("size","mooInk 尺寸"),
         ("interval_sec","檢查秒數"),
-        ("pico_port","Pico COM（空白停用）")]):
+        ("pico_port","Pico CDC COM（空白停用）")]):
         ttk.Label(frame,text=label).grid(row=index,column=0,sticky="w",pady=5)
         fields[name] = tk.StringVar(value=str(getattr(settings,name)))
         if name=="size":
@@ -378,7 +379,7 @@ def main():
             except Exception as exc:
                 events.put(("manual_result",(action,None,str(exc))))
         threading.Thread(target=run,daemon=True).start()
-    for label, action in (("測試 USB／查詢 sleep","list"),("測試 Space","wake")):
+    for label, action in (("測試 USB／查詢 sleep","list"),("測試喚醒 Space","wake")):
         button = ttk.Button(buttons,text=label,command=lambda a=action: manual_job(a))
         button.pack(side="left",padx=3)
         action_buttons.append(button)
@@ -416,6 +417,7 @@ def main():
                     messagebox.showwarning("USB/Pico 操作",error,parent=root)
                 elif operation == "wake":
                     usb_status.set(result)
+                    logger.info("Pico 手動喚醒：%s", result)
                 else:
                     usb_status.set("USB 連線成功；sleep 內 %d 張圖片" % len(result))
                     dialog = tk.Toplevel(root)

@@ -24,3 +24,5 @@ python pico2w_usb2bluetooth.py --port COM6 --text " "
 請勿同時開啟 Tera Term 和 Watch Tool。CDC 回顯只確認輸入；藍牙斷線、佇列滿時 Pico 會顯示錯誤，且不會把斷線期間的按鍵延後送出。Python 寫入成功不代表藍牙送達或電子紙喚醒。
 
 Pico SDK 2.2.0 / Bluetooth Classic HID，非 BLE。一般按鍵維持 60 ms。實機喚醒仍需驗證。
+
+Watch Tool 會觀察 Tera Term 一樣的單一 Space 回顯（0.5 秒），無額外控制命令。CDC 回顯一致不代表藍牙送達；若無回顯或收到錯誤提示，紀錄未確認，不自動重送。

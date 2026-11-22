@@ -105,7 +105,7 @@ class WatcherTests(unittest.TestCase):
                 return {"changed":actions.count("upload")==1}
             def wake(port, log):
                 actions.append("wake")
-                return "F12 已送出"
+                return "Space 已送出且 CDC 回顯一致"
             p=Processor(Path(tmp)/"state.json",render,upload,wake)
             self.assertIn("已回讀驗證",p.check(s))
             self.assertIn("無更新",p.check(s))
@@ -126,3 +126,21 @@ class WatcherTests(unittest.TestCase):
                     p.check(s)
             wake.assert_not_called()
             self.assertEqual(upload.call_count,2)
+
+
+    def test_watcher_wake_uses_plain_space(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from mooink_display_watcher import pico_wake
+        with patch("pico2w_usb2bluetooth.ports",return_value=[SimpleNamespace(device="COM6")]), \
+             patch("pico2w_usb2bluetooth.send_space",return_value=True) as send:
+            self.assertIn("CDC 回顯一致",pico_wake("COM6",lambda msg:None))
+            send.assert_called_once_with("COM6")
+
+    def test_watcher_wake_error_is_not_success(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from mooink_display_watcher import pico_wake
+        with patch("pico2w_usb2bluetooth.ports",return_value=[SimpleNamespace(device="COM6")]), \
+             patch("pico2w_usb2bluetooth.send_space",side_effect=TimeoutError("no echo")):
+            self.assertIn("傳送未確認",pico_wake("COM6",lambda msg:None))

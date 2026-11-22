@@ -142,7 +142,7 @@ py mooink_full_cmd_demo.py --ip 192.168.1.137
 
 執行：python -m pip install -r requirements.txt，然後 python mooink_display_watcher.py。
 第一次啟動出現設定視窗，儲存後常駐系統匣。設定檔及成功轉圖狀態位於 %LOCALAPPDATA%\mooink。
-預設檢查間隔 60 秒、尺寸 10.3、IP 192.168.1.140、Pico COM6（清空 COM 欄位可停用）。
+預設檢查間隔 60 秒、尺寸 10.3、Pico CDC COM6（清空 COM 欄位可停用）；不需 IP。
 
 | 尺寸 | 監控 Word | 產出 PNG | 自訂 Word 紙張寬×高 |
 |---|---|---|---|
@@ -163,19 +163,7 @@ py mooink_full_cmd_demo.py --ip 192.168.1.137
 
 
 
-### 常駐程式 Wi-Fi 配對介面
-
-更新後執行 python -m pip install -r requirements.txt。系統匣右鍵「設定／Wi-Fi 配對」，輸入目標 IP（預設 192.168.1.140）：
-- **Wi-Fi 配對**：請先保持 mooInk 喚醒；明確同意後啟動配對，於 GUI 輸入裝置顯示的 PIN，不需命令列。
-- **匯入既有憑證**：選擇先前 CLI 配對產生的 deviceid.dat 和 privatekey.dat 所在的同一個資料夾；認證成功才加密匯入。
-- **測試連線**：使用目前 IP 回傳的裝置識別碼查找本機 DPAPI 憑證，驗證 API。
-- **查詢資料夾**：唯讀列出 API 回報的資料夾，並直接以路徑解析 GET 查詢 `sleep`、`/sleep`、`Document/sleep`，對照已知文件路徑、顯示 HTTP 狀態及物件類型，可複製完整結果。沒有列出不等於證明不存在；即使解析成功也不代表可寫入 USB MTP 的 sleep。
-
-憑證依閱讀器的動態識別碼保存在 %LOCALAPPDATA%\mooink_interactive_lab\auth，與 mooink_full_cmd_demo.py 共用，不依 IP 單獨存取、不寫入 Git 或一般 JSON 設定檔。IP 改變或更換裝置時，會重新確認裝置身分；其他裝置的憑證不會被覆寫。PIN、私鑰及配對回應不記錄至 log。
-
-Wi-Fi 配對及文件診斷保留於獨立工具；Watch Tool 的自動更新不使用 Wi-Fi。
-
-
+Wi-Fi 配對及文件診斷保留於獨立研究工具；Watch Tool 不使用 Wi-Fi。
 
 ### Watch Tool USB sleep 自動更新
 
@@ -185,3 +173,7 @@ Wi-Fi 配對及文件診斷保留於獨立工具；Watch Tool 的自動更新不
 4. Word 更新時轉換 PNG，WPD 直接比對 sleep 同名圖片。若不同，先回讀舊圖並備份至 `%LOCALAPPDATA%/mooink/watcher_backup`，確認刪除後上傳新圖，再回讀 SHA-256。只有驗證成功才發 Pico Space。其他圖片不刪除；若上傳失敗保留備份且不發 Space。
 5. 相同內容不重複寫入；每次檢查實際連接的閱讀器。可從系統匣「立即重新轉圖／傳送」強制檢查並測試喚醒。若韌體因刪除重建物件而忘記選取的休眠圖，需實機確認是否重新選取。
 6. 舊 Wi-Fi PDF 自動更新設定不再使用；以前產生的 PDF 不會被程式刪除。Wi-Fi 配對憑證保留。
+
+### Pico 喚醒（CDC 直傳）
+
+Tera Term 原字元直傳已由使用者確認可用。Watch Tool 以相同方式在 COM6 寫入單一 Space (`0x20`)，沒有舊控制指令、模式或換行。等待正常原字元回顯（0.5 秒），回顯一致只代表 Pico CDC 接收，不能當成藍牙送達或螢幕喚醒確認。未收到回顯或遇到斷線提示時，記錄傳送未確認；不盲目重送，可按「測試喚醒 Space」或「立即重新轉圖／傳送」再測試。使用 Watch Tool 前請關閉 Tera Term 以釋放 COM6。已燒錄直傳版 Pico 不需要重燒。

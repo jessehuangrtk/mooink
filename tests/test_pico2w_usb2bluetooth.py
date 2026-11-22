@@ -1,5 +1,5 @@
 import unittest
-from pico2w_usb2bluetooth import send_text
+from pico2w_usb2bluetooth import send_text, send_space
 
 class FakeSerial:
     def __init__(self,*args,**kwargs):
@@ -31,3 +31,40 @@ class KeyboardTests(unittest.TestCase):
         class Short(FakeSerial):
             def write(self,data):return 0
         with self.assertRaises(OSError):send_text("COM6"," ",serial_factory=Short)
+
+
+class EchoSerial(FakeSerial):
+    def __init__(self, response=b" "):
+        super().__init__()
+        self.response=response
+        self.reset=False
+    def reset_input_buffer(self):
+        self.reset=True
+    def read(self,n):
+        return self.response
+
+class WakeEchoTests(unittest.TestCase):
+    def test_only_one_space_and_exact_echo(self):
+        ser=EchoSerial()
+        self.assertTrue(send_space("COM6",serial_factory=lambda *a,**kw:ser))
+        self.assertTrue(ser.reset)
+        self.assertEqual(ser.writes,[b" "])
+        self.assertTrue(ser.closed)
+
+    def test_disconnect_notice_not_success(self):
+        ser=EchoSerial(b" \r\nBluetooth not connected; key not sent.\r\n")
+        with self.assertRaisesRegex(RuntimeError,"藍牙尚未連線"):
+            send_space("COM6",serial_factory=lambda *a,**kw:ser)
+        self.assertEqual(ser.writes,[b" "])
+
+    def test_no_echo_no_retry(self):
+        ser=EchoSerial(b"")
+        with self.assertRaises(TimeoutError):
+            send_space("COM6",serial_factory=lambda *a,**kw:ser)
+        self.assertEqual(ser.writes,[b" "])
+        self.assertTrue(ser.closed)
+
+    def test_space_in_notice_is_not_echo(self):
+        ser=EchoSerial(b"Bluetooth connected.\r\n")
+        with self.assertRaises(RuntimeError):
+            send_space("COM6",serial_factory=lambda *a,**kw:ser)
