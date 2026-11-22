@@ -159,7 +159,7 @@ py mooink_full_cmd_demo.py --ip 192.168.1.137
 
 兩個 Word 都設直式、0.5 cm 邊界、單頁。程式依目前設定的裝置尺寸監控對應 DOCX，保留兩個尺寸獨立檔名，不會傳錯另一尺寸。需要 Word 或 LibreOffice。超過一頁會報錯，不會自動截掉第二頁。
 
-**Wi-Fi PDF 封面測試：** 原生文件 API 無法解析 sleep（實測 HTTP 404），但使用者已確認可將閱讀中的書本封面設為休眠圖。Watch Tool 改為產生單頁 PDF，啟用後透過原生 API 上傳、回讀驗證、選用 Pico F12 喚醒及開啟第 1 頁。實體封面刷新仍待驗證。
+**USB 自動更新：** Wi-Fi PDF 開啟未成為休眠封面，Watch Tool 改回原生 USB WPD MTP，直接更新 sleep 內的專用 PNG。
 
 
 
@@ -173,14 +173,15 @@ py mooink_full_cmd_demo.py --ip 192.168.1.137
 
 憑證依閱讀器的動態識別碼保存在 %LOCALAPPDATA%\mooink_interactive_lab\auth，與 mooink_full_cmd_demo.py 共用，不依 IP 單獨存取、不寫入 Git 或一般 JSON 設定檔。IP 改變或更換裝置時，會重新確認裝置身分；其他裝置的憑證不會被覆寫。PIN、私鑰及配對回應不記錄至 log。
 
-配對、資料夾查詢和 PDF 傳送均使用原生 Wi-Fi API；不直接寫入 sleep PNG。
+Wi-Fi 配對及文件診斷保留於獨立工具；Watch Tool 的自動更新不使用 Wi-Fi。
 
 
-### PDF 封面更新測試
 
-1. mooInk 設定「正在閱讀的書本封面」作為休眠圖，15 秒自動休眠。
-2. Watch Tool 設定中確認 IP、尺寸及 Wi-Fi 配對；COM 可留空。若有 Pico，確認它配對的是同一台閱讀器。
-3. 勾選「啟用 Wi-Fi 自動更新 PDF 封面（測試）」並儲存。首次啟用或手動立即重新轉圖／傳送會執行更新。
-4. 對應尺寸將產生本機 PNG 及 PDF（均 Git ignore），上傳 `Document/mooink_display_10.pdf` 或 `Document/mooink_display_13.pdf`。僅這兩個專用名稱會被覆寫，不刪除任何文件。回讀 SHA-256 一致後才嘗試 F12（若可用，等待 2 秒）並要求開啟第 1 頁。
-5. 測試第一次顯示及休眠，再修改 Word 內容並儲存，觀察同名 PDF 覆寫後封面是否立即更新。HTTP 2xx 不是實體畫面更新證明；若封面仍舊，可能是封面快取，下一步再測試輪替名稱。未設定 Pico 時可先手動喚醒，程式仍嘗試開啟 PDF。
-6. 失敗保留本機檔案，下次檢查再試；已完成上傳及開啟的相同內容不重複傳送。日誌記錄各階段，不記錄私鑰或 PIN。
+### Watch Tool USB sleep 自動更新
+
+1. 先結束舊版 Watch Tool，git pull 後執行 `python mooink_display_watcher.py`。
+2. 只連接一台 mooInk 的 USB 資料線；選擇正確尺寸、COM（選用），按「測試 USB／查詢 sleep」。
+3. 勾選「啟用 USB 自動更新 sleep 圖片」並儲存。第一次上傳後，在 mooInk 選取 `mooink_display_10.png` 或 `mooink_display_13.png` 作為自訂休眠圖，而非閱讀中書本封面；設定 15 秒自動休眠。
+4. Word 更新時轉換 PNG，WPD 直接比對 sleep 同名圖片。若不同，先回讀舊圖並備份至 `%LOCALAPPDATA%/mooink/watcher_backup`，確認刪除後上傳新圖，再回讀 SHA-256。只有驗證成功才發 Pico F12。其他圖片不刪除；若上傳失敗保留備份且不發 F12。
+5. 相同內容不重複寫入；每次檢查實際連接的閱讀器。可從系統匣「立即重新轉圖／傳送」強制檢查並測試喚醒。若韌體因刪除重建物件而忘記選取的休眠圖，需實機確認是否重新選取。
+6. 舊 Wi-Fi PDF 自動更新設定不再使用；以前產生的 PDF 不會被程式刪除。Wi-Fi 配對憑證保留。
