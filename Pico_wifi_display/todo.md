@@ -11,6 +11,15 @@
 - [x] 實作 GetObject 分塊讀取、長度驗證、增量 SHA-256（待編譯及實機確認）。
 - [ ] 實機確認唯一 sleep、對應 VID/PID 與檔案 hash。
 
+## P0.5 — CDC 設定介面
+- [x] 新增無逐字回顯、Enter 開啟選單、數字選項、CR/LF、Backspace 的 menu 模組。
+- [x] Wi-Fi、SMB、Bluetooth 目標、尺寸、監控間隔 RAM 設定及密碼遮蔽。
+- [x] 獨立 native USB CDC menu preview UF2 target；主機測試程式。
+- [ ] 驗證 menu UF2 編譯及 Tera Term COM 實機操作。
+- [ ] 持久化設定（保護 flash / BT TLV、斷電復原、不輸出密碼）；Save / Apply / Cancel。
+- [ ] 實作 Wi-Fi 掃描／連線測試、SMB 測試、BT 配對／忘記／重連與真實狀態。
+- [ ] 原生 CDC + PIO USB Host 雙 USB：需額外 Host 接頭、VBus 安全供電，核對 PIO/Wi-Fi 資源及 SDK 相容性。整合 menu 後驗收。
+
 ## P1 — Wi-Fi / SMB
 - [ ] Pico Wi-Fi 連線及重連、私有設定生成（密碼不提交）。
 - [ ] 移植 libsmb2，固定依賴版本，確認 Pico 2W / FreeRTOS 或 lwIP 相容。

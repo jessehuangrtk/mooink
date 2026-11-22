@@ -12,3 +12,5 @@ fi
 cmake -S firmware -B build -G Ninja -DPICO_BOARD=pico2_w -DPICO_SDK_PATH="$PICO_SDK_PATH"
 cmake --build build
 echo "UF2: $PWD/build/pico_wifi_display_probe.uf2"
+
+echo "CDC menu preview: $PWD/build/pico_wifi_display_menu.uf2"

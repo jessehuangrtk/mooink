@@ -52,3 +52,9 @@ Pico Wi-Fi/SMB2/3 主動讀取 mooink_display.png → 分塊 SHA-256 → USB MTP
 ### 唯讀 GetObject / SHA-256
 
 在唯一 sleep 目錄中若存在唯一 mooink_display.png（1 byte～16 MiB），probe 使用 GetObject、512-byte USB buffer 及 RP2350 pico_sha256 增量 hash。UART 印出 SHA256 和 bytes；不儲存／修改檔案。比較 Windows `Get-FileHash -Algorithm SHA256` 的來源值。MTP 容器解析器支援 header 及資料跨 transfer、同一 transfer 內相接容器；交易 ID、長度及 response 必須一致。SDK 2.2.0 header API 已核對，尚未確認編譯／實機。
+
+## CDC 設定選單（獨立 preview）
+
+新 target `build/pico_wifi_display_menu.uf2` 是單獨 CDC 設定介面預覽，不執行 USB Host／SMB／Bluetooth。以 Tera Term 連接新 Pico 的原生 USB COM，115200 8N1、Local echo OFF、Transmit CR。任何字元均不逐字回顯，閒置時只按 Enter 顯示主選單；數字 + Enter 選取。Wi-Fi SSID/密碼、SMB server/share/user/密碼、Bluetooth MAC、尺寸與週期可輸入 RAM 草稿；狀態僅顯示密碼是否已設置，重啟會遺失。Bluetooth 真實配對、執行連線及 flash Save/Apply 尚未實作。0 回上一層或離開，再按 Enter 顯示。此 UF2 不會送出鍵盤字元，也不修改 mooInk。
+
+最終希望保留 Pico 原生 USB CDC，另以 PIO USB Host 連接 mooInk（官方 dual mode 架構）。須增加獨立的 USB Host 接頭、適當 USB D+/D- 及保護供電；目前 P0 的 native Host probe 仍獨立，兩個 UF2 不能同時執行。等 PIO Host、CYW43439 PIO/DMA 資源及時序實測通過才整合。若選用原生 USB Host，則設定選單必須改走外接 USB-TTL 或其他介面。不要把 Windows 和 mooInk 同時連到原生 USB 埠。

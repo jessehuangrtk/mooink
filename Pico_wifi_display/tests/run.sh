@@ -7,4 +7,6 @@ cc -std=c11 -Wall -Wextra -Werror -Ifirmware tests/test_mtp_codec.c firmware/mtp
 cc -std=c11 -Wall -Wextra -Werror -Ifirmware tests/test_mtp_stream.c firmware/mtp_codec.c firmware/mtp_stream.c -o "$tmp/test_stream"
 "$tmp/test_stream"
 "$tmp/test_mtp"
+cc -std=c11 -Wall -Wextra -Werror -Ifirmware tests/test_display_menu.c firmware/display_menu.c -o "$tmp/test_menu"
+"$tmp/test_menu"
 python3 -m unittest discover -s tests -p 'test_*.py' -v

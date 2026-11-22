@@ -13,3 +13,11 @@ target_link_libraries(pico_wifi_display_probe PRIVATE pico_stdlib tinyusb_host p
 pico_enable_stdio_usb(pico_wifi_display_probe 0)
 pico_enable_stdio_uart(pico_wifi_display_probe 1)
 pico_add_extra_outputs(pico_wifi_display_probe)
+
+# Independent native CDC menu preview; no USB host or Bluetooth in this UF2.
+add_executable(pico_wifi_display_menu menu_main.c display_menu.c)
+target_include_directories(pico_wifi_display_menu PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(pico_wifi_display_menu PRIVATE pico_stdlib)
+pico_enable_stdio_usb(pico_wifi_display_menu 1)
+pico_enable_stdio_uart(pico_wifi_display_menu 0)
+pico_add_extra_outputs(pico_wifi_display_menu)
