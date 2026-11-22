@@ -253,7 +253,7 @@ class Processor:
 
 def main():
     import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox
+    from tkinter import ttk, filedialog, messagebox, simpledialog
     import pystray
     from PIL import Image, ImageDraw
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -337,19 +337,99 @@ def main():
             root.withdraw()
         except (ValueError,OSError) as exc:
             messagebox.showerror("設定錯誤", str(exc), parent=root)
-    ttk.Button(frame,text="儲存並開始監控",command=save).grid(row=8,column=1,sticky="e",pady=10)
+    wifi_box = ttk.LabelFrame(frame, text="mooInk Wi-Fi API 配對（不需要共享路徑）", padding=8)
+    wifi_box.grid(row=8,column=0,columnspan=3,sticky="ew",pady=(4,8))
+    wifi_status = tk.StringVar(value="尚未測試目前 IP 的配對狀態")
+    ttk.Label(wifi_box,textvariable=wifi_status,wraplength=540).pack(anchor="w")
+    wifi_buttons = ttk.Frame(wifi_box)
+    wifi_buttons.pack(fill="x",pady=(6,0))
+    pairing_busy = False
+    action_buttons = []
+
+    def wifi_job(action):
+        nonlocal pairing_busy
+        if pairing_busy:
+            return
+        from mooink_wifi_pairing import (pair, import_credentials, test_connection,
+                                         inspect_folders, WifiPairingError)
+        from mooink_full_cmd_demo import require_private_ipv4
+        try:
+            ip = require_private_ipv4(fields["mooink_ip"].get())
+        except ValueError as exc:
+            messagebox.showerror("IP 錯誤",str(exc),parent=root)
+            return
+        directory = None
+        if action == "pair":
+            if not messagebox.askyesno(
+                "Wi-Fi 配對",
+                "請確認 %s 是你要配對的 mooInk，並讓閱讀器保持喚醒。\n"
+                "此操作會啟動裝置配對流程並顯示 PIN，可能變更配對狀態。\n"
+                "其他閱讀器的本機憑證不會被覆寫。確定繼續？" % ip,
+                parent=root):
+                return
+        elif action == "import":
+            directory = filedialog.askdirectory(
+                title="選擇含 deviceid.dat 和 privatekey.dat 的憑證資料夾",
+                parent=root)
+            if not directory:
+                return
+        pairing_busy = True
+        for button in action_buttons:
+            button.configure(state="disabled")
+        wifi_status.set("正在連線 %s…" % ip)
+
+        def request_pin():
+            answer = {"value": None}
+            done = threading.Event()
+            events.put(("wifi_pin", (ip, answer, done)))
+            while not done.wait(.2):
+                if stop.is_set():
+                    return None
+            return answer["value"]
+
+        def run():
+            try:
+                if action == "pair":
+                    device = pair(ip, request_pin)
+                    result = ("已配對並驗證，憑證已加密儲存", device)
+                elif action == "import":
+                    device = import_credentials(ip, directory)
+                    result = ("已驗證並匯入加密憑證", device)
+                elif action == "folders":
+                    result = inspect_folders(ip)
+                else:
+                    result = ("已通過 Wi-Fi API 認證", test_connection(ip))
+                events.put(("wifi_result", (ip, action, result, None)))
+            except WifiPairingError as exc:
+                events.put(("wifi_result", (ip, action, None, str(exc))))
+            except Exception as exc:
+                events.put(("wifi_result", (ip, action, None,
+                    "Wi-Fi 操作失敗（%s）；請檢查裝置及相依套件。" % type(exc).__name__)))
+        threading.Thread(target=run, daemon=True).start()
+
+    for label, action in (("Wi-Fi 配對","pair"),("匯入既有憑證","import"),
+                          ("測試連線","test"),("查詢資料夾","folders")):
+        button = ttk.Button(wifi_buttons,text=label,command=lambda a=action: wifi_job(a))
+        button.pack(side="left",padx=3)
+        action_buttons.append(button)
+    save_button = ttk.Button(frame,text="儲存並開始監控",command=save)
+    save_button.grid(row=9,column=1,sticky="e",pady=10)
+    action_buttons.append(save_button)
+    fields["mooink_ip"].trace_add("write",lambda *_: wifi_status.set(
+        "IP 已修改，請測試本台裝置的配對狀態" if not pairing_busy else "配對操作進行中；結果將標示原 IP"))
+
     root.protocol("WM_DELETE_WINDOW",root.withdraw)
     def tray_action(action):
         return lambda *_: events.put((action,None))
     tray=pystray.Icon("mooink_display",icon,"mooInk Display Watcher",pystray.Menu(
-        pystray.MenuItem("設定",tray_action("settings"),default=True),
+        pystray.MenuItem("設定／Wi-Fi 配對",tray_action("settings"),default=True),
         pystray.MenuItem("立即重新轉圖與傳送",tray_action("check")),
         pystray.MenuItem("開啟監控目錄",tray_action("folder")),
         pystray.MenuItem("開啟執行記錄",tray_action("log")),
         pystray.MenuItem("結束",tray_action("exit"))))
     thread=threading.Thread(target=worker,daemon=True)
     def drain():
-        nonlocal force_pending
+        nonlocal force_pending, pairing_busy
         while True:
             try:
                 action,value=events.get_nowait()
@@ -357,6 +437,55 @@ def main():
                 break
             if action=="status":
                 status_text.set(value)
+            elif action=="wifi_pin":
+                ip, answer, done = value
+                root.deiconify()
+                root.lift()
+                try:
+                    answer["value"] = simpledialog.askstring(
+                        "mooInk Wi-Fi PIN", "請輸入 %s 螢幕上顯示的配對 PIN：" % ip,
+                        show="*",parent=root)
+                finally:
+                    done.set()
+            elif action=="wifi_result":
+                ip, operation, result, error = value
+                pairing_busy = False
+                for button in action_buttons:
+                    button.configure(state="normal")
+                if error:
+                    wifi_status.set(ip + "：" + error)
+                    logger.info("Wi-Fi API %s: %s", ip, error)
+                    messagebox.showwarning("Wi-Fi 操作", error, parent=root)
+                elif operation == "folders":
+                    folders = result["folders"]
+                    sleep = result["sleep"]
+                    summary = ("找到 sleep：" + "、".join(sleep) if sleep else
+                               "目前回傳清單未列出 sleep")
+                    if not result["complete"]:
+                        summary += "（API 清單可能不完整）"
+                    wifi_status.set("%s：認證成功；%s" % (ip, summary))
+                    dialog = tk.Toplevel(root)
+                    dialog.title("mooInk Wi-Fi 資料夾 - " + ip)
+                    dialog.geometry("620x460")
+                    ttk.Label(dialog,text="API 回傳 %d 個資料夾；%s。\n即使列出 sleep，也尚未證明 PNG 寫入可用。" %
+                              (len(folders),summary),wraplength=590,padding=8).pack(fill="x")
+                    panel = ttk.Frame(dialog)
+                    panel.pack(fill="both",expand=True,padx=8,pady=8)
+                    listing = tk.Text(panel,wrap="none")
+                    scroll = ttk.Scrollbar(panel,orient="vertical",command=listing.yview)
+                    listing.configure(yscrollcommand=scroll.set)
+                    scroll.pack(side="right",fill="y")
+                    listing.pack(side="left",fill="both",expand=True)
+                    listing.insert("1.0","\n".join(folders) or "（沒有資料夾）")
+                    listing.configure(state="disabled")
+                    logger.info("Wi-Fi API %s: 資料夾 %d 個, sleep 列出 %s, 清單完整 %s",
+                                ip,len(folders),bool(sleep),result["complete"])
+                else:
+                    message, device = result
+                    wifi_status.set("%s：%s（%s）" % (ip,message,device[:12]))
+                    logger.info("Wi-Fi API %s: %s",ip,message)
+                if fields["mooink_ip"].get().strip() != ip:
+                    wifi_status.set("原 IP %s 操作已結束；目前 IP 已改，請重新測試。" % ip)
             elif action=="settings":
                 root.deiconify()
                 root.lift()
