@@ -195,5 +195,9 @@
 
 ### R031–R039 第二批施工紀錄
 
-- R031、R032、R036、R038、R039、R066、R069、R095：已建立獨立 display_update 協調器、dry-run/容量/備份/目標身分 gate、持久 journal callback、回讀比對及一次性 wake gate；新增逐步失敗注入測試。仍待實際 backend、journal 耐久層、實機及測試執行，不勾選為全部完成。
+- R031、R032、R036、R038、R039、R066、R069、R095：已建立獨立 display_update 協調器、dry-run/容量/備份/目標身分 gate、持久 journal callback、回讀比對及一次性 wake gate；新增逐步失敗注入測試。仍待實際 backend、journal 耐久層及實機，不勾選為全部完成。協調器 host 單元測試已通過（見下方）。
 - R033–R035、R037：stage/backup/mutator 合約已定義；尚未接入實際 SMB 封存、MTP data-out 或 rename，保持唯讀。
+
+### 第二批 host 測試結果（2026-11-22）
+
+GCC 14.2.0，C11、-Wall -Wextra -Werror、AddressSanitizer、UndefinedBehaviorSanitizer：test_display_update 通過。已比對測試來源與 GitHub 1043e075 的三個 blob SHA 完全一致。包含 20 個 callback 失敗點、備份／回讀不一致、容量不足、USB generation 變更、同內容跳過與未完成 journal 阻擋重試。這是 host fake 測試，非 Pico SDK 交叉編譯或硬體／真實持久化驗收；R095/R091 保持未完成。

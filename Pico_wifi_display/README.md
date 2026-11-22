@@ -88,3 +88,5 @@ Pico 每輪 SMB 檢查完成（包括來源讀取失敗但 SMB 已連線）會�
 ## 安全更新流程（協調器，尚未接入硬體）
 
 `firmware/display_update.c` 提供 dry-run、目標身分／容量／備份驗證、journal gate、回讀驗證及單次 Bluetooth 喚醒的狀態機。`tests/test_display_update.c` 模擬逐步失敗及 USB 重連。詳見 [adapter 合約](docs/update_adapter.md)。尚未連接真實 MTP write、SMB backup、持久 journal 或 Bluetooth；現有 probe 仍禁止刪除和上傳，不應視作整合韌體。
+
+協調器 host 測試已於 2026-11-22 使用 GCC 14.2.0、嚴格警告及 ASan/UBSan 通過；三個來源檔案 blob SHA 與 1043e075 提交一致。尚未執行整個 tests/run.sh、Pico 交叉編譯或真實 SMB/MTP/BT 測試。
