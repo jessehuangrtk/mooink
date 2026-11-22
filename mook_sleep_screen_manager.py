@@ -437,7 +437,7 @@ class SleepScreenManager:
 
     def _pdf_pages(self, source: Path, temporary_dir: Path, render_scale=1.5):
         """Render each Office document page with Office COM or LibreOffice."""
-        import fitz
+        import pymupdf
         pdf = temporary_dir / (safe_file_name(source.stem) + ".pdf")
         completed = False
         if os.name == "nt":
@@ -489,13 +489,13 @@ class SleepScreenManager:
                                     capture_output=True, text=True, timeout=120)
             if result.returncode != 0 or not pdf.exists():
                 raise RuntimeError("LibreOffice PDF 轉換失敗：" + result.stderr[:200])
-        with fitz.open(pdf) as doc:
+        with pymupdf.open(pdf) as doc:
             for index, page in enumerate(doc):
                 if index >= 100:
                     self.logs.append("Page limit 100 reached: " + source.name)
                     break
                 # Limit large PDF render output memory; final resize to device.
-                pix = page.get_pixmap(matrix=fitz.Matrix(render_scale, render_scale), alpha=False)
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(render_scale, render_scale), alpha=False)
                 from PIL import Image
                 image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
                 yield index + 1, image
@@ -519,13 +519,13 @@ class SleepScreenManager:
                     items = self._pdf_pages(source, Path(temp))
                 elif ext == ".pdf":
                     # Optional convenience: PDF input (same rendering pipeline)
-                    import fitz
+                    import pymupdf
                     def page_images():
-                        with fitz.open(source) as pdf:
+                        with pymupdf.open(source) as pdf:
                             for i, page in enumerate(pdf):
                                 if i >= 100:
                                     break
-                                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                                pix = page.get_pixmap(matrix=pymupdf.Matrix(1.5, 1.5), alpha=False)
                                 yield i+1, Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
                     items = page_images()
                 else:
