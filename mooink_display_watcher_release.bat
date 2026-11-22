@@ -40,6 +40,9 @@ for %%F in (heribert17_win_access.py heribert17_wpd_LICENSE) do (
 for %%F in (requirements.txt install.bat start.bat README.txt) do (
   copy /b /y "scripts\watcher_release\%%F" "%STAGE%\%%F" >nul || goto failed
 )
+rem Record the source revision if Git is available on the packaging PC.
+where git >nul 2>&1
+if not errorlevel 1 git rev-parse HEAD > "%STAGE%\release_commit.txt" 2>nul
 if "%NO_WHEELS%"=="1" goto publish
 echo [INFO] Preparing offline wheels for the current Windows Python.
 python -c "import sys; assert sys.platform=='win32' and sys.version_info >= (3,10), 'Windows Python 3.10+ required'" || goto failed

@@ -10,11 +10,14 @@ mooInk Display Watcher - standalone Windows release
    A bundled wheelhouse is installed offline; otherwise pip needs access
    to its configured package index. The installer copies missing working
    documents/images from template without overwriting existing ones.
-5. Connect one mooInk via USB, and the already configured Pico 2W via USB
-   if Bluetooth Space wake is needed. Close Tera Term to free its COM port.
+5. The watcher can start without any USB device. Connect one mooInk whenever
+   convenient. Pico 2W is optional: leave its COM field blank to disable wake,
+   or use its actual COM port if Bluetooth Space wake is needed. Close Tera
+   Term only if using Pico.
 6. Run start.bat. Open settings (tray icon), select the working folder,
-   display size and actual Pico COM port, test USB and Space, then opt in
-   to USB automatic updates.
+   display size and optional Pico COM port, then opt in to USB automatic
+   updates. USB/Space manual tests are optional; enabling USB does not require
+   either device to be connected.
 7. On first upload select the matching custom sleep image in mooInk:
    mooink_display_10.png or mooink_display_13.png, not the book cover.
    Set auto sleep to 15 seconds if desired.
@@ -45,3 +48,9 @@ Windows WPD device arrival/removal notifications also trigger an immediate check
 If notifications are unavailable, very brief disconnects between polls can be missed.
 WPD operations can
 take longer than the poll interval. Physical screen refresh is not verified.
+
+Release packaging does not overwrite an existing ../mooink_display_watcher
+folder. Stop the old watcher, back up or rename that folder before rebuilding,
+and copy your edited working Word files into the new folder if needed.
+Check the saved watch directory in settings after moving the folder.
+release_commit.txt identifies the source Git revision when Git is available.
