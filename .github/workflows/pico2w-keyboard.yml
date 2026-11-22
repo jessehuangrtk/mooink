@@ -19,6 +19,8 @@ jobs:
         run: |
           cc -std=c11 -Wall -Wextra -Werror -I pico2w_usb2bluetooth pico2w_usb2bluetooth/test_key_command.c -o /tmp/test_key_command
           /tmp/test_key_command
+          cc -std=c11 -Wall -Wextra -Werror -I pico2w_usb2bluetooth pico2w_usb2bluetooth/test_terminal_keys.c -o /tmp/test_terminal_keys
+          /tmp/test_terminal_keys
       - name: ARM cross compiler and host tools
         run: |
           sudo apt-get update

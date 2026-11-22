@@ -10,6 +10,7 @@
 #include "btstack_stdin.h"
 #include "btstack_tlv.h"
 #include "key_command.h"
+#include "terminal_keys.h"
 
 #define NAME "mooInk Pico2W Keyboard"
 #define PEER_TAG 0x4d4b4254u
@@ -40,6 +41,13 @@ static bool key_extended;
 static char line[100];
 static unsigned line_len;
 static bool overflow;
+#define RAW_QUEUE_SIZE 32
+static bool keyboard_mode, key_raw, raw_cr;
+static terminal_key_t raw_queue[RAW_QUEUE_SIZE];
+static unsigned raw_head, raw_count;
+static uint8_t raw_ascii, escape_state;
+static uint32_t escape_end;
+
 
 static uint32_t ms(void){return to_ms_since_boot(get_absolute_time());}
 static bool expired(uint32_t at){return (int32_t)(ms()-at)>=0;}
@@ -53,9 +61,59 @@ static void stop_pair(void){
   if(pairing_request==3)gap_ssp_confirmation_negative(pending_peer);
   pairing_request=0;
 }
-static void key_fail(const char *why){
-  if(key_state!=IDLE){key_state=IDLE;printf("ERR %s %s\n",key_extended?"KEYH":"KEY",why);}
+static void clear_raw_queue(void){
+  if(raw_count)printf("EVENT RAW DISCARDED count=%u\n",raw_count);
+  raw_head=raw_count=0;
 }
+static void key_fail(const char *why){
+  if(key_state!=IDLE){
+    key_state=IDLE;
+    printf("ERR %s %s\n",key_raw?"RAW":(key_extended?"KEYH":"KEY"),why);
+  }
+  clear_raw_queue();
+}
+static void start_key(uint8_t mod,uint8_t usage,unsigned hold,bool extended,bool raw,uint8_t ascii){
+  key_hold_ms=hold;key_extended=extended;key_raw=raw;raw_ascii=ascii;
+  key_mod=mod;key_usage=usage;key_end=ms()+hold+5000;key_state=DOWN;
+  hid_device_request_can_send_now_event(cid);
+}
+static void raw_next(void){
+  if(!keyboard_mode||!connected||!paired||key_state!=IDLE||!raw_count)return;
+  terminal_key_t k=raw_queue[raw_head];
+  raw_head=(raw_head+1)%RAW_QUEUE_SIZE;--raw_count;
+  start_key(k.mod,k.usage,60,false,true,k.ascii);
+}
+static void raw_input(uint8_t ch){
+  if(escape_state&&expired(escape_end))escape_state=0;
+  if(escape_state==1){
+    escape_state=(ch=='['||ch=='O')?2:0;
+    return;
+  }
+  if(escape_state==2){
+    if(ch>=0x40&&ch<=0x7e)escape_state=0;
+    return;
+  }
+  if(ch==27){
+    escape_state=1;escape_end=ms()+250;
+    puts("EVENT RAW ESC_SEQUENCE_IGNORED");return;
+  }
+  if(ch=='\n'&&raw_cr){raw_cr=false;return;}
+  raw_cr=ch=='\r';
+  terminal_key_t k;
+  if(!terminal_key(ch,&k)){
+    printf("ERR RAW UNSUPPORTED ASCII=0x%02X\n",(unsigned)ch);return;
+  }
+  if(ch==' ')printf("KEY SPACE ASCII=0x20 HID=0x%02X MOD=0x%02X\n",k.usage,k.mod);
+  else if(k.usage==40)printf("KEY ENTER ASCII=0x%02X HID=0x%02X MOD=0x%02X\n",ch,k.usage,k.mod);
+  else if(k.usage==42)printf("KEY BACKSPACE ASCII=0x%02X HID=0x%02X MOD=0x%02X\n",ch,k.usage,k.mod);
+  else if(k.usage==43)printf("KEY TAB ASCII=0x%02X HID=0x%02X MOD=0x%02X\n",ch,k.usage,k.mod);
+  else printf("KEY '%c' ASCII=0x%02X HID=0x%02X MOD=0x%02X\n",ch,ch,k.usage,k.mod);
+  if(!paired||!connected){puts("ERR RAW NOT_CONNECTED");return;}
+  if(raw_count==RAW_QUEUE_SIZE){puts("ERR RAW QUEUE_FULL");return;}
+  raw_queue[(raw_head+raw_count)%RAW_QUEUE_SIZE]=k;++raw_count;
+  raw_next();
+}
+
 static void report(uint8_t mod,uint8_t usage){
   uint8_t data[]={0xa1,1,mod,0,usage,0,0,0,0,0};
   hid_device_send_interrupt_message(cid,data,sizeof(data));
@@ -64,10 +122,24 @@ static void command(char *s){
   key_command_t key;
   if(!strcmp(s,"HELLO")){puts("OK HELLO MOOINK_PICO2W_BT/1");return;}
   if(!strcmp(s,"STATUS")){
-    printf("OK STATUS ready=%u paired=%u connected=%u pairing=%u connecting=%u peer=%s key_parser=2\n",
-        ready,paired,connected,pairing,connecting,paired?bd_addr_to_str(peer):"-");return;
+    printf("OK STATUS ready=%u paired=%u connected=%u pairing=%u connecting=%u peer=%s key_parser=2 mode=%s\n",
+        ready,paired,connected,pairing,connecting,paired?bd_addr_to_str(peer):"-",keyboard_mode?"KEYBOARD":"COMMAND");return;
   }
   if(!ready){puts("ERR NOT_READY");return;}
+  if(!strcmp(s,"HELP")){
+    puts("OK HELP STATUS CONNECT MODE KEYBOARD KEY KEYH PAIR CANCEL DISCONNECT FORGET");
+    puts("EVENT HELP KEYBOARD exit=Ctrl+] (ASCII 0x1D)");return;
+  }
+  if(!strcmp(s,"MODE KEYBOARD")){
+    if(!connected||!paired){puts("ERR MODE NOT_CONNECTED");return;}
+    if(key_state!=IDLE){puts("ERR MODE BUSY");return;}
+    clear_raw_queue();keyboard_mode=true;raw_cr=false;escape_state=0;
+    puts("OK MODE KEYBOARD");
+    puts("EVENT RAW Type ASCII directly; Ctrl+] returns to COMMAND");return;
+  }
+  if(!strcmp(s,"MODE COMMAND")){
+    puts("OK MODE COMMAND");return;
+  }
   if(!strcmp(s,"PAIR")){
     if(paired||connected||connecting||pairing){puts("ERR PAIR FORGET_OR_CANCEL_FIRST");return;}
     pairing=true;pairing_request=0;pair_end=ms()+120000;
@@ -112,18 +184,24 @@ static void command(char *s){
   if(parsed==KEY_PARSE_OK){
     if(!connected||!paired){puts("ERR KEY NOT_CONNECTED");return;}
     if(key_state!=IDLE){puts("ERR KEY BUSY");return;}
-    key_hold_ms=key.hold;key_extended=key.extended;
-    key_mod=(uint8_t)key.mod;key_usage=(uint8_t)key.usage;
-    key_end=ms()+key.hold+5000;key_state=DOWN;
-    hid_device_request_can_send_now_event(cid);return;
+    start_key((uint8_t)key.mod,(uint8_t)key.usage,key.hold,key.extended,false,0);return;
   }
   puts("ERR UNKNOWN_COMMAND");
 }
 static void serial_char(char c){
+  // Ctrl+] is a reserved escape in either mode, never a Bluetooth key.
+  if((uint8_t)c==0x1d){
+    keyboard_mode=false;escape_state=0;raw_cr=false;
+    clear_raw_queue();line_len=0;overflow=false;
+    puts("OK MODE COMMAND");return;
+  }
+  if(keyboard_mode){raw_input((uint8_t)c);return;}
   if(c=='\r'||c=='\n'){
     if(overflow)puts("ERR LINE_TOO_LONG");
     else if(line_len){line[line_len]=0;command(line);}
-    line_len=0;overflow=false;return;
+    line_len=0;overflow=false;
+    if(keyboard_mode)raw_cr=c=='\r';
+    return;
   }
   if(c<32||c>126||line_len>=sizeof(line)-1){overflow=true;return;}
   if(!overflow)line[line_len++]=c;
@@ -139,6 +217,7 @@ static void tick(btstack_timer_source_t *t){
   }else if(key_state==HOLD&&expired(release_at)){
     key_state=UP;hid_device_request_can_send_now_event(cid);
   }
+  raw_next();
   btstack_run_loop_set_timer(t,20);btstack_run_loop_add_timer(t);
 }
 static void packet(uint8_t type,uint16_t channel,uint8_t *p,uint16_t size){
@@ -190,10 +269,11 @@ static void packet(uint8_t type,uint16_t channel,uint8_t *p,uint16_t size){
       if(!connected||hid_subevent_can_send_now_get_hid_cid(p)!=cid)return;
       if(key_state==DOWN){
         report(key_mod,key_usage);key_state=HOLD;release_at=ms()+key_hold_ms;
-        if(key_extended)printf("EVENT KEY DOWN mod=%u usage=%u hold_ms=%u\n",key_mod,key_usage,key_hold_ms);
+        if(key_extended||key_raw)printf("EVENT KEY DOWN mod=%u usage=%u hold_ms=%u\n",key_mod,key_usage,key_hold_ms);
       }else if(key_state==UP){
         report(0,0);key_state=IDLE;
-        if(key_extended){puts("EVENT KEY UP");puts("OK KEYH SENT");}
+        if(key_raw){puts("EVENT KEY UP");printf("OK RAW SENT ASCII=0x%02X HID=0x%02X\n",raw_ascii,key_usage);}
+        else if(key_extended){puts("EVENT KEY UP");puts("OK KEYH SENT");}
         else puts("OK KEY SENT");
       }
       return;

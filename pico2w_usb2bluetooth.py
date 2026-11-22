@@ -110,6 +110,18 @@ class PicoKeyboard:
         self.ser = serial_factory(self.port, 115200, timeout=0.10, write_timeout=2)
         try:
             self.ser.reset_input_buffer()
+            # Exit direct terminal mode before sending any printable command.
+            # Old firmware treats Ctrl+] as a bad line, which is also safe.
+            self.ser.write(b"\x1d\n")
+            deadline = time.monotonic() + 3
+            while True:
+                response = self._line(deadline)
+                if response is None:
+                    raise TimeoutError("Pico 無法切回 COMMAND 模式")
+                if response in ("OK MODE COMMAND", "ERR LINE_TOO_LONG"):
+                    break
+                if response:
+                    self.event(response)
             result = self.command("HELLO", timeout=3)
             if result != MAGIC:
                 raise RuntimeError("COM 埠不是相容的 mooInk Pico 2W 韌體：" + result)

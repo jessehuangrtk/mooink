@@ -96,3 +96,20 @@ python pico2w_usb2bluetooth.py --port COM6 wake --key space --hold-ms 1000
 ### KEY 回傳 UNKNOWN_COMMAND
 
 新版改用獨立 ASCII 十進位解析器，不再依賴 sscanf。重新編譯並燒錄 UF2 後，STATUS 應出現 `key_parser=2`；HELLO 保持相容。先在清醒的 mooInk 搜尋欄測試 `key a`，再測試休眠 Space。無效 KEY 參數會回傳 INVALID_USAGE_OR_HOLD，而非 UNKNOWN_COMMAND。
+
+## Tera Term 即時鍵盤模式（僅 USB CDC）
+
+先關閉 Watch Tool/Python GUI，避免 COM 埠占用。Tera Term 選 Serial COM6，115200、8N1、Flow control None，Terminal Transmit CR（CRLF 亦可），Local echo On 可看到所輸入的指令。開啟後輸入 STATUS、必要時 CONNECT、待 connected=1 再輸入 MODE KEYBOARD（每條指令按 Enter）。
+
+進入 KEYBOARD 後，ASCII 英數、標點、Space、Enter、Tab、Backspace 逐字直接送 HID，不需 Enter；按下 Ctrl+]（0x1D）返回 COMMAND。F1～F12/方向鍵 escape sequence 暫不支援，請回 COMMAND 用 KEY/KEYH；非 ASCII/中文不轉送。每鍵回顯 ASCII/HID/modifier、DOWN/UP、OK RAW SENT 或明確錯誤。佇列最多 32 個待送按鍵，滿載拒絕新輸入；斷線清除佇列，不重送。按 Ctrl+] 會丟棄待送佇列，已開始的按鍵仍完成放開。Python 開啟 COM 時先送 Ctrl+] 切回 COMMAND，新舊韌體相容。請勿同時開啟 Tera Term 和 Watch Tool。
+
+範例（實際回報不代表目標裝置已顯示）：
+
+~~~text
+MODE KEYBOARD
+OK MODE KEYBOARD
+KEY SPACE ASCII=0x20 HID=0x2C MOD=0x00
+EVENT KEY DOWN mod=0 usage=44 hold_ms=60
+EVENT KEY UP
+OK RAW SENT ASCII=0x20 HID=0x2C
+~~~

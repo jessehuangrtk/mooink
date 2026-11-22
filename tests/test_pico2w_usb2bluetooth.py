@@ -25,7 +25,9 @@ class FakeSerial:
     def write(self, data):
         cmd = data.decode("ascii").strip()
         self.commands.append(cmd)
-        if cmd == "HELLO":
+        if data == b"\x1d\n":
+            response = "OK MODE COMMAND"
+        elif cmd == "HELLO":
             response = "OK HELLO MOOINK_PICO2W_BT/1"
         elif cmd == "STATUS":
             response = "OK STATUS ready=1 paired=1 connected=1 pairing=0 connecting=0 peer=AA:BB:CC:DD:EE:FF"
@@ -61,12 +63,22 @@ class KeyboardTests(unittest.TestCase):
     def test_handshake_and_explicit_tap(self):
         received = []
         with PicoKeyboard("COM6", serial_factory=FakeSerial, event=received.append) as board:
-            self.assertEqual(board.ser.commands, ["HELLO"])
+            self.assertEqual(board.ser.commands, ["", "HELLO"])
             self.assertEqual(board.status()["connected"], "1")
             self.assertEqual(board.wake("f12"), "OK KEY SENT")
             self.assertEqual(board.ser.commands[-1], "KEY 0 69")
             self.assertIn("EVENT diagnostic", received)
         self.assertFalse(board.ser.is_open)
+
+    def test_old_firmware_escape_is_safe(self):
+        class Old(FakeSerial):
+            def write(self, data):
+                if data == b"\x1d\n":
+                    self.buffer.extend(b"ERR LINE_TOO_LONG\r\n")
+                    return len(data)
+                return super().write(data)
+        with PicoKeyboard("COM6", serial_factory=Old) as board:
+            self.assertEqual(board.wake("space"), "OK KEY SENT")
 
     def test_long_space_diagnostic(self):
         received = []
@@ -82,7 +94,7 @@ class KeyboardTests(unittest.TestCase):
         with PicoKeyboard("COM6", serial_factory=FakeSerial) as board:
             with self.assertRaises(ValueError):
                 board.type_text("abc中文")
-            self.assertEqual(board.ser.commands, ["HELLO"])
+            self.assertEqual(board.ser.commands, ["", "HELLO"])
 
     def test_error_not_success(self):
         with PicoKeyboard("COM6", serial_factory=FakeSerial) as board:
@@ -92,7 +104,7 @@ class KeyboardTests(unittest.TestCase):
     def test_reject_wrong_firmware(self):
         class Wrong(FakeSerial):
             def write(self, data):
-                self.buffer.extend(b"OK HELLO other\r\n")
+                self.buffer.extend(b"OK MODE COMMAND\r\n" if data == b"\x1d\n" else b"OK HELLO other\r\n")
         with self.assertRaisesRegex(RuntimeError, "不是相容"):
             PicoKeyboard("COM6", serial_factory=Wrong)
 
