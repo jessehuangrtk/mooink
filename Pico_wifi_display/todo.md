@@ -7,8 +7,8 @@
 - [x] 獨立 Python 圖片產生工具，統一檔名 mooink_display.png。
 - [x] Pico 原生 USB Host MTP 唯讀探測程式及 codec 測試。
 - [ ] 核對 SDK 2.2.0 編譯、USB Host 5 V 供電及 UART 實機輸出。
-- [ ] 建立可重複的主機單元測試，涵蓋跨 USB packet 的容器。
-- [ ] 實作 GetObject 分塊讀取、長度驗證、增量 SHA-256。
+- [x] 建立主機單元測試，涵蓋跨 USB packet 的容器（尚待執行）。
+- [x] 實作 GetObject 分塊讀取、長度驗證、增量 SHA-256（待編譯及實機確認）。
 - [ ] 實機確認唯一 sleep、對應 VID/PID 與檔案 hash。
 
 ## P1 — Wi-Fi / SMB

@@ -48,3 +48,7 @@ Pico Wi-Fi/SMB2/3 主動讀取 mooink_display.png → 分塊 SHA-256 → USB MTP
 5. 獨立 Python 設定/診斷及端到端實機測試。既有 Watch Tool 不修改。
 
 520 KiB SRAM，不將整張 PNG 假設放入記憶體；分塊處理。Wi-Fi 與 Bluetooth 共用 CYW43439，三介面共存尚未驗證。
+
+### 唯讀 GetObject / SHA-256
+
+在唯一 sleep 目錄中若存在唯一 mooink_display.png（1 byte～16 MiB），probe 使用 GetObject、512-byte USB buffer 及 RP2350 pico_sha256 增量 hash。UART 印出 SHA256 和 bytes；不儲存／修改檔案。比較 Windows `Get-FileHash -Algorithm SHA256` 的來源值。MTP 容器解析器支援 header 及資料跨 transfer、同一 transfer 內相接容器；交易 ID、長度及 response 必須一致。SDK 2.2.0 header API 已核對，尚未確認編譯／實機。

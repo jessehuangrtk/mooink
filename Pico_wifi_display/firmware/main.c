@@ -5,6 +5,8 @@
 #include "tusb.h"
 #include "host/usbh_pvt.h"
 #include "mtp_codec.h"
+#include "mtp_stream.h"
+#include "pico/sha256.h"
 
 #define LIMIT 16384
 static uint8_t addr, itf, ep_in, ep_out;
@@ -13,25 +15,42 @@ static uint32_t tid, deadline;
 static uint16_t operation;
 static enum {IDLE, TX, RX_DATA, RX_RESPONSE} state;
 static enum {PROBE_INFO, PROBE_SESSION, PROBE_STORES, PROBE_ROOT, PROBE_OBJECT,
-             PROBE_CHILDREN, PROBE_CHILD, PROBE_CLOSE, PROBE_DONE} step;
+             PROBE_CHILDREN, PROBE_CHILD, PROBE_HASH, PROBE_CLOSE, PROBE_DONE} step;
 static uint8_t tx[32] __attribute__((aligned(4)));
 static uint8_t rx[512] __attribute__((aligned(4)));
 static uint8_t payload[LIMIT];
-static size_t used, expected, tx_size;
+static size_t used, tx_size;
+static mtp_stream stream;
+static pico_sha256_state_t hash;
+static bool hash_active;
+static uint32_t image_handle,image_size;
+static unsigned image_matches;
 static uint32_t stores[16], handles[512], sleep_handle, sleep_store;
 static size_t store_n, store_i, handle_n, handle_i;
 static unsigned sleep_matches;
-static bool data_seen;
 static uint32_t now_ms(void){return to_ms_since_boot(get_absolute_time());}
-static void fail(const char *message){printf("ERROR %s; unplug/replug mooInk to retry\n",message);failed=true;state=IDLE;}
+static void hash_cleanup(void){if(hash_active){pico_sha256_cleanup(&hash);hash_active=false;}}
+static void fail(const char *message){hash_cleanup();printf("ERROR %s; unplug/replug mooInk to retry\n",message);failed=true;state=IDLE;}
+static bool consume(const uint8_t *p,size_t n,void *ctx){
+    (void)ctx;
+    if(operation==MTP_GET_OBJECT){
+        if(!hash_active||n>image_size-used)return false;
+        pico_sha256_update_blocking(&hash,p,n);used+=n;
+    }else{
+        if(n>LIMIT-used)return false;
+        memcpy(payload+used,p,n);used+=n;
+    }
+    return true;
+}
 static bool data_operation(void){return operation!=MTP_OPEN&&operation!=MTP_CLOSE;}
 static bool queue_in(void){
     if(!usbh_edpt_xfer(addr,ep_in,rx,sizeof(rx))){fail("bulk IN submit");return false;}
     deadline=now_ms()+5000;return true;
 }
 static void start(uint16_t op,const uint32_t *params,size_t n){
-    operation=op;used=0;expected=0;data_seen=false;
+    operation=op;used=0;
     uint32_t id=op==MTP_DEVICE_INFO||op==MTP_OPEN?0:++tid;
+    mtp_stream_init(&stream,op,id,data_operation(),op==MTP_GET_OBJECT?image_size:LIMIT,consume,NULL);
     tx_size=mtp_command(tx,sizeof(tx),op,id,params,n);
     if(!tx_size){fail("invalid command");return;}
     state=TX;deadline=now_ms()+5000;
@@ -48,6 +67,14 @@ static void next_root(void){
     printf("sleep folder handle=%08lx storage=%08lx\n",(unsigned long)sleep_handle,(unsigned long)sleep_store);
     uint32_t args[]={sleep_store,0,sleep_handle};
     step=PROBE_CHILDREN;start(MTP_HANDLES,args,3);
+}
+static void hash_image_or_close(void){
+    if(image_matches!=1||!image_size||image_size>16u*1024u*1024u){
+        printf("Image hash skipped: matches=%u size=%lu\n",image_matches,(unsigned long)image_size);
+        step=PROBE_CLOSE;start(MTP_CLOSE,NULL,0);return;
+    }
+    if(pico_sha256_try_start(&hash,SHA256_BIG_ENDIAN,false)!=PICO_OK){fail("SHA256 hardware unavailable");return;}
+    hash_active=true;step=PROBE_HASH;start(MTP_GET_OBJECT,&image_handle,1);
 }
 static void completed(void){
     uint32_t one=1;
@@ -67,18 +94,32 @@ static void completed(void){
     case PROBE_OBJECT:
         if(!mtp_object_info(payload,used,&format,&parent,name,sizeof(name))){fail("malformed ObjectInfo");return;}
         printf("ROOT %08lx %04x %s\n",(unsigned long)handles[handle_i],format,name);
-        if(format==0x3001&&!strcmp(name,"sleep")){++sleep_matches;sleep_handle=handles[handle_i];sleep_store=stores[store_i];}
+        if(format==0x3001&&(parent==0||parent==0xffffffffu)&&!strcmp(name,"sleep")){++sleep_matches;sleep_handle=handles[handle_i];sleep_store=stores[store_i];}
         ++handle_i;next_root();break;
     case PROBE_CHILDREN:
         if(!mtp_array32(payload,used,handles,512,&handle_n)){fail("sleep handle list exceeds limit or malformed");return;}
-        printf("sleep objects=%u\n",(unsigned)handle_n);handle_i=0;
+        printf("sleep objects=%u\n",(unsigned)handle_n);handle_i=0;image_matches=0;image_size=0;
         if(handle_n){step=PROBE_CHILD;start(MTP_OBJECT_INFO,&handles[0],1);}
-        else{step=PROBE_CLOSE;start(MTP_CLOSE,NULL,0);}break;
+        else hash_image_or_close();break;
     case PROBE_CHILD:
         if(!mtp_object_info(payload,used,&format,&parent,name,sizeof(name))){fail("malformed sleep ObjectInfo");return;}
         printf("SLEEP %08lx %04x %s\n",(unsigned long)handles[handle_i],format,name);
+        if(!strcmp(name,"mooink_display.png")){
+            ++image_matches;
+            if(format!=0x3001&&parent==sleep_handle){image_handle=handles[handle_i];image_size=mtp_u32(payload+8);}
+            else image_size=0;
+        }
         if(++handle_i<handle_n)start(MTP_OBJECT_INFO,&handles[handle_i],1);
-        else{step=PROBE_CLOSE;start(MTP_CLOSE,NULL,0);}break;
+        else hash_image_or_close();break;
+    case PROBE_HASH:{
+        if(used!=image_size||stream.total!=image_size||!hash_active){fail("image size mismatch");return;}
+        sha256_result_t result;
+        pico_sha256_finish(&hash,&result);hash_active=false;
+        printf("mooink_display.png SHA256=");
+        for(unsigned i=0;i<SHA256_RESULT_BYTES;i++)printf("%02x",result.bytes[i]);
+        printf(" bytes=%lu\n",(unsigned long)used);
+        step=PROBE_CLOSE;start(MTP_CLOSE,NULL,0);break;
+    }
     case PROBE_CLOSE:
         step=PROBE_DONE;puts(sleep_matches==1?"READ-ONLY PROBE COMPLETE":"READ-ONLY PROBE INCOMPLETE: sleep not unique");break;
     default:fail("unexpected step");break;
@@ -113,36 +154,19 @@ static bool set_config(uint8_t d,uint8_t i){
     configured=true;usbh_driver_set_config_complete(d,i);return true;
 }
 static void close_driver(uint8_t d){
-    if(d==addr){addr=0;configured=mounted=failed=false;state=IDLE;puts("MTP detached");}
+    if(d==addr){hash_cleanup();addr=0;configured=mounted=failed=false;state=IDLE;puts("MTP detached");}
 }
 static bool xfer(uint8_t d,uint8_t ep,xfer_result_t result,uint32_t n){
     if(d!=addr||failed)return true;
     if(result!=XFER_RESULT_SUCCESS){fail("USB transfer failed");return true;}
     if(state==TX&&ep==ep_out&&n==tx_size){state=RX_DATA;queue_in();return true;}
     if((state!=RX_DATA&&state!=RX_RESPONSE)||ep!=ep_in||n>sizeof(rx)){fail("unexpected transfer");return true;}
-    if(!n){queue_in();return true;}
-    /* A data container begins at a USB transfer boundary; payload may span
-       multiple transfers. Responses have their own short container. */
-    if(state==RX_DATA&&expected){
-        if(n>expected-used){fail("data container overflow");return true;}
-        memcpy(payload+used,rx,n);used+=n;
-        if(used==expected){expected=0;state=RX_RESPONSE;}
-        queue_in();return true;
-    }
-    mtp_header h;
-    if(!mtp_decode_header(rx,n,&h)||h.transaction!=(operation==MTP_DEVICE_INFO||operation==MTP_OPEN?0:tid)){fail("invalid MTP header or transaction");return true;}
-    if(h.type==MTP_DATA&&state==RX_DATA&&!data_seen&&data_operation()&&h.code==operation){
-        if(h.length-12>LIMIT||n>h.length){fail("data exceeds probe buffer");return true;}
-        data_seen=true;used=n-12;expected=h.length-12;memcpy(payload,rx+12,used);
-        if(used==expected){expected=0;state=RX_RESPONSE;}
-        queue_in();return true;
-    }
-    if(h.type==MTP_RESPONSE&&h.length==n){
-        if(h.code!=MTP_OK){printf("MTP op=%04x response=%04x\n",operation,h.code);fail("MTP rejected operation");return true;}
-        if(data_operation()&&!data_seen){fail("missing data");return true;}
+    if(!mtp_stream_feed(&stream,rx,n)){fail("invalid MTP container, size or transaction");return true;}
+    if(stream.done){
+        if(stream.response!=MTP_OK){printf("MTP op=%04x response=%04x\n",operation,stream.response);fail("MTP rejected operation");return true;}
         state=IDLE;completed();return true;
     }
-    fail("unexpected MTP container");return true;
+    queue_in();return true;
 }
 static const usbh_class_driver_t driver={.name="MTP probe",.init=init,.deinit=deinit,.open=open_driver,.set_config=set_config,.xfer_cb=xfer,.close=close_driver};
 usbh_class_driver_t const *usbh_app_driver_get_cb(uint8_t *count){*count=1;return &driver;}
