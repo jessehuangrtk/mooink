@@ -82,6 +82,7 @@ class DeviceProfilesTest(unittest.TestCase):
             self.assertEqual(loaded.preview_file(rid).read_bytes(), b"PNG mock data")
             loaded.assign(rid, "13.3", "mooInk")
             self.assertNotIn("last_updated", loaded.lookup(rid))
+            self.assertFalse(loaded.preview_file(rid).exists())
 
 
 if __name__ == "__main__":

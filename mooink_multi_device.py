@@ -68,6 +68,13 @@ class DeviceRegistry:
             new_data[device_id] = row
             _atomic_json(self.path, {"version": 1, "devices": new_data})
             self.devices = new_data
+            if row.get("last_updated") is None:
+                # A previous-size preview must not look like a verified image
+                # for this newly assigned size.
+                try:
+                    self.preview_file(device_id).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def success(self, device_id, result, size, name):
         self.valid_id(device_id)
