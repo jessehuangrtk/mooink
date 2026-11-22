@@ -15,6 +15,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Test key parser on host
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -I pico2w_usb2bluetooth pico2w_usb2bluetooth/test_key_command.c -o /tmp/test_key_command
+          /tmp/test_key_command
       - name: ARM cross compiler and host tools
         run: |
           sudo apt-get update

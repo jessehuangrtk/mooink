@@ -92,3 +92,7 @@ python pico2w_usb2bluetooth.py --port COM6 wake --key space --hold-ms 1000
 ~~~
 
 長按可能在清醒時造成重複輸入或翻頁，僅用於明確的診斷操作。KEYH SENT 是本地 BTstack 交付回報，不是主機確認。
+
+### KEY 回傳 UNKNOWN_COMMAND
+
+新版改用獨立 ASCII 十進位解析器，不再依賴 sscanf。重新編譯並燒錄 UF2 後，STATUS 應出現 `key_parser=2`；HELLO 保持相容。先在清醒的 mooInk 搜尋欄測試 `key a`，再測試休眠 Space。無效 KEY 參數會回傳 INVALID_USAGE_OR_HOLD，而非 UNKNOWN_COMMAND。

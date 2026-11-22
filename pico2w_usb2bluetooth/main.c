@@ -9,6 +9,7 @@
 #include "btstack.h"
 #include "btstack_stdin.h"
 #include "btstack_tlv.h"
+#include "key_command.h"
 
 #define NAME "mooInk Pico2W Keyboard"
 #define PEER_TAG 0x4d4b4254u
@@ -60,10 +61,10 @@ static void report(uint8_t mod,uint8_t usage){
   hid_device_send_interrupt_message(cid,data,sizeof(data));
 }
 static void command(char *s){
-  unsigned mod,usage,hold;char tail;
+  key_command_t key;
   if(!strcmp(s,"HELLO")){puts("OK HELLO MOOINK_PICO2W_BT/1");return;}
   if(!strcmp(s,"STATUS")){
-    printf("OK STATUS ready=%u paired=%u connected=%u pairing=%u connecting=%u peer=%s\n",
+    printf("OK STATUS ready=%u paired=%u connected=%u pairing=%u connecting=%u peer=%s key_parser=2\n",
         ready,paired,connected,pairing,connecting,paired?bd_addr_to_str(peer):"-");return;
   }
   if(!ready){puts("ERR NOT_READY");return;}
@@ -106,19 +107,14 @@ static void command(char *s){
     else {puts("ERR PIN EXPECTED_SIX_DIGITS_OR_CONFIRM");return;}
     puts("OK PIN");return;
   }
-  // KEY retains its original 60 ms semantics. KEYH is opt-in test only.
-  hold=60;
-  bool is_key=sscanf(s,"KEY %u %u %c",&mod,&usage,&tail)==2;
-  bool is_hold=false;
-  if(!is_key){
-    is_hold=sscanf(s,"KEYH %u %u %u %c",&mod,&usage,&hold,&tail)==3;
-  }
-  if(is_key||is_hold){
+  key_parse_result_t parsed=parse_key_command(s,&key);
+  if(parsed==KEY_PARSE_INVALID){puts("ERR KEY INVALID_USAGE_OR_HOLD");return;}
+  if(parsed==KEY_PARSE_OK){
     if(!connected||!paired){puts("ERR KEY NOT_CONNECTED");return;}
     if(key_state!=IDLE){puts("ERR KEY BUSY");return;}
-    if(mod>255||usage<4||usage>231||hold<20||hold>2000){puts("ERR KEY INVALID_USAGE_OR_HOLD");return;}
-    key_hold_ms=hold;key_extended=is_hold;
-    key_mod=(uint8_t)mod;key_usage=(uint8_t)usage;key_end=ms()+hold+5000;key_state=DOWN;
+    key_hold_ms=key.hold;key_extended=key.extended;
+    key_mod=(uint8_t)key.mod;key_usage=(uint8_t)key.usage;
+    key_end=ms()+key.hold+5000;key_state=DOWN;
     hid_device_request_can_send_now_event(cid);return;
   }
   puts("ERR UNKNOWN_COMMAND");
