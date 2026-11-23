@@ -87,3 +87,23 @@ AUTOMATIC UPDATE TRIGGERS (both ON by default; select one or both):
   both to ON without overwriting existing settings.
 - A success timestamp is recorded only after MTP readback verification. Pico
   is not required. Multiple readers retain distinct last-delivered versions.
+
+ARBITRARY DOCX SOURCE AND MINIMAL MARGINS
+- In the Watcher settings choose "Custom DOCX file" (Select file) and browse to
+  any existing .docx anywhere on the PC. The path is stored in
+  %LOCALAPPDATA%\mooink\mooink_display_watcher.json (custom_docx).
+- When selected, this one DOCX is the input for all paired readers; the output
+  PNG is still size-specific: mooink_display_10.png or mooink_display_13.png.
+  The selected DOCX is NEVER modified. The generated PNG stays in watch_dir.
+- When rendering this custom DOCX, white page margins are trimmed by finding
+  the bounding box of grayscale content below luminance 245/255 on the
+  high-resolution PDF page. The result is fitted without stretching into the
+  full e-paper resolution, keeping a thin ~0.8% white safety border.
+  Aspect ratio differences may leave larger whitespace on two sides.
+- Empty white pages remain empty. Multi-page documents are rejected to avoid
+  silently discarding pages. Word/LibreOffice must be installed.
+- Clear the custom DOCX field to resume size-specific default Word templates
+  with their original layout and margins.
+- Both the hot-plug and file-polling trigger options apply to the chosen DOCX.
+  File-polling uses the selected document's content/hash and modification time.
+  Changing the file selection creates a new render cache key.

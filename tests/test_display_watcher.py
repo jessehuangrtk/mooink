@@ -366,3 +366,89 @@ class WatcherTests(unittest.TestCase):
         self.assertTrue(reader_event_matches(arrival, reader_a))
         self.assertFalse(reader_event_matches(arrival, reader_b))
         self.assertFalse(reader_event_matches(arrival, ""))
+
+
+    def test_arbitrary_docx_selects_shared_source_for_both_sizes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            external = root / "任意選取的報告.docx"
+            external.write_bytes(b"docx bytes")
+            for size, tag in (("10.3", "10"), ("13.3", "13")):
+                cfg = Settings(watch_dir=tmp, size=size, custom_docx=str(external))
+                cfg.validate()
+                source, png = cfg.paths()
+                self.assertEqual(source, external)
+                self.assertEqual(png.name, "mooink_display_" + tag + ".png")
+                self.assertNotEqual(cfg.render_key(),
+                                    Settings(watch_dir=tmp, size=size).render_key())
+            self.assertEqual(Settings(watch_dir=tmp).paths()[0].name,
+                             "mooink_display_10.docx")
+
+    def test_custom_docx_refuses_missing_or_non_docx_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "notes.txt"
+            f.write_text("hello")
+            for path in (str(f), str(Path(tmp) / "missing.docx")):
+                with self.assertRaises(ValueError):
+                    Settings(watch_dir=tmp, custom_docx=path).validate()
+
+    def test_custom_docx_uses_high_resolution_cropped_renderer(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "project-notes.docx"
+            source.write_bytes(b"document")
+            cfg = Settings(watch_dir=tmp, custom_docx=str(source))
+            normal = Mock(side_effect=lambda src, dst, size: dst.write_bytes(b"normal"))
+            cropped = Mock(side_effect=lambda src, dst, size: dst.write_bytes(b"cropped"))
+            proc = Processor(Path(tmp) / "state.json", render=normal,
+                             cropped_render=cropped)
+            self.assertIn("已輸出", proc.check(cfg))
+            cropped.assert_called_once()
+            normal.assert_not_called()
+            self.assertEqual(cfg.paths()[1].read_bytes(), b"cropped")
+            # Removing the custom file selection resumes the original template.
+            cfg.paths()[1].unlink()
+            Path(tmp, "mooink_display_10.docx").write_bytes(b"default")
+            proc.check(Settings(watch_dir=tmp))
+            normal.assert_called_once()
+
+    def test_crop_content_is_lossless_on_white_page(self):
+        from PIL import Image, ImageDraw
+        from mooink_display_watcher import crop_document_content, fit_minimal_margin
+        page = Image.new("RGB", (400, 600), "white")
+        drawer = ImageDraw.Draw(page)
+        drawer.rectangle((155, 225, 235, 305), fill="black")
+        cropped = crop_document_content(page)
+        self.assertEqual(cropped.size, (81, 81))
+        self.assertEqual(cropped.getpixel((0, 0)), 0)
+        fitted = fit_minimal_margin(cropped, "10.3")
+        self.assertEqual(fitted.size, (1404, 1872))
+        self.assertEqual(fitted.getpixel((0, 0)), 255)
+        self.assertEqual(fitted.getpixel((1403, 1871)), 255)
+        blank = Image.new("L", (123, 456), 255)
+        self.assertEqual(crop_document_content(blank).size, blank.size)
+
+    def test_real_render_pipeline_crops_before_resizing(self):
+        from PIL import Image, ImageDraw
+        from unittest.mock import patch
+        from mooink_display_watcher import render_png
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Image.new("L", (500, 700), 255)
+            ImageDraw.Draw(page).rectangle((200, 250, 290, 340), fill=0)
+            def pages(*args, **kwargs):
+                yield (1, page)
+            with patch("mooink_display_watcher.SleepScreenManager") as factory:
+                factory.return_value._pdf_pages.side_effect = pages
+                normal = Path(tmp) / "normal.png"
+                tight = Path(tmp) / "tight.png"
+                render_png(Path(tmp) / "any.docx", normal, "10.3")
+                render_png(Path(tmp) / "any.docx", tight, "10.3", crop_margins=True)
+            with Image.open(normal) as original, Image.open(tight) as cropped:
+                mask = lambda im: im.convert("L").point(
+                    [255 if val < 245 else 0 for val in range(256)], mode="L").getbbox()
+                left, top, right, bottom = mask(original)
+                l2, t2, r2, b2 = mask(cropped)
+                self.assertGreater(r2 - l2, (right - left) * 2)
+                self.assertGreater(b2 - t2, (bottom - top) * 2)
+                self.assertGreater(l2, 0)
+                self.assertGreater(t2, 0)

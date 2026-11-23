@@ -76,10 +76,15 @@ class Settings:
     enable_usb: bool = False  # explicit opt-in for USB image replacement
     update_on_connect: bool = True  # initial USB connection and reconnection
     update_on_file_change: bool = True  # scheduled DOCX checks
+    custom_docx: str = ""  # blank: size-specific DOCX in watch_dir
 
     def validate(self):
         if self.enable_usb and not (self.update_on_connect or self.update_on_file_change):
             raise ValueError("啟用 USB 自動更新時，至少選擇「插拔更新」或「Word 定時更新」一項")
+        if self.custom_docx:
+            source = Path(self.custom_docx).expanduser()
+            if source.suffix.casefold() != ".docx" or not source.is_file():
+                raise ValueError("請選擇實際存在的 DOCX 檔案")
         if self.size not in RESOLUTIONS:
             raise ValueError("尺寸必須為 10.3 或 13.3")
         if not 5 <= self.interval_sec <= 86400:
@@ -96,10 +101,14 @@ class Settings:
     def paths(self):
         stem = "mooink_display_" + ("10" if self.size == "10.3" else "13")
         root = Path(self.watch_dir)
-        return root / (stem + ".docx"), root / (stem + ".png")
+        source = (Path(self.custom_docx).expanduser() if self.custom_docx
+                  else root / (stem + ".docx"))
+        return source, root / (stem + ".png")
 
     def render_key(self):
-        return json.dumps(["render-v4", str(Path(self.watch_dir).resolve()), self.size],
+        source, _ = self.paths()
+        return json.dumps(["render-v5", str(Path(self.watch_dir).resolve()), self.size,
+                           str(source.resolve()), bool(self.custom_docx)],
                           ensure_ascii=False)
 
 def read_json(path, default):
@@ -136,9 +145,40 @@ def sha256(path):
             digest.update(block)
     return digest.hexdigest()
 
-def render_png(source, output, size):
-    """Render one page with existing Office/PDF backend, preserving margins.
-    Refuse multi-page inputs rather than silently dropping content.
+def crop_document_content(image, *, threshold=245):
+    """Remove mostly-white PDF page margins without cutting nonwhite content.
+
+    Thresholding before resize keeps faint text, lines and inserted images.
+    If the document is completely white, retain the full page.
+    """
+    from PIL import Image
+    grayscale = image.convert("L")
+    mask = grayscale.point([255 if value < threshold else 0
+                            for value in range(256)], mode="L")
+    bounds = mask.getbbox()
+    return grayscale.crop(bounds) if bounds else grayscale
+
+
+def fit_minimal_margin(image, size, *, border_fraction=0.008):
+    """Scale cropped content to the e-paper canvas with a thin white safety edge."""
+    from PIL import Image, ImageOps
+    width, height = RESOLUTIONS[size]
+    border = max(4, round(min(width, height) * border_fraction))
+    inner = (width - 2 * border, height - 2 * border)
+    prepared = ImageOps.pad(image.convert("L"), inner,
+                            method=Image.Resampling.LANCZOS, color=255)
+    final = Image.new("L", (width, height), 255)
+    final.paste(prepared, (border, border))
+    return final
+
+
+def render_png(source, output, size, *, crop_margins=False):
+    """Render a one-page Word document to grayscale PNG.
+
+    Custom DOCX mode removes the rendered page's outer whitespace before
+    fitting the content to the full resolution. Default templates retain
+    their original document margins for backward compatibility.
+    Multi-page files remain refused instead of silently hiding pages.
     """
     from PIL import Image, ImageOps
     com = None
@@ -149,7 +189,8 @@ def render_png(source, output, size):
     try:
         with tempfile.TemporaryDirectory(prefix="mooink_watch_") as tmp:
             work = Path(tmp)
-            mgr = SleepScreenManager(size=size, orientation="portrait", fit="contain", output_dir=work)
+            mgr = SleepScreenManager(size=size, orientation="portrait", fit="contain",
+                                     output_dir=work)
             pages = mgr._pdf_pages(Path(source), work, render_scale=3.5)
             try:
                 first = next(pages, None)
@@ -157,12 +198,18 @@ def render_png(source, output, size):
                     raise RuntimeError("Word 沒有可轉換頁面")
                 if next(pages, None) is not None:
                     raise RuntimeError("Word 超過一頁；請調整到單頁，避免漏掉內容")
+                if crop_margins:
+                    # Trim the high-resolution PDF raster BEFORE downsampling.
+                    content = crop_document_content(first[1])
+                    out = fit_minimal_margin(content, size)
+                else:
+                    out = ImageOps.pad(first[1].convert("L"), RESOLUTIONS[size],
+                                       method=Image.Resampling.LANCZOS, color=255)
             finally:
                 pages.close()
-            out = ImageOps.pad(first[1].convert("L"), RESOLUTIONS[size],
-                               method=Image.Resampling.LANCZOS, color=255)
             out = out.point([round(i/17)*17 for i in range(256)])
-            temp = Path(output).with_name("." + Path(output).name + "." + uuid.uuid4().hex + ".tmp")
+            temp = Path(output).with_name("." + Path(output).name + "." +
+                                          uuid.uuid4().hex + ".tmp")
             try:
                 out.save(temp, format="PNG", optimize=True)
                 os.replace(temp, output)
@@ -171,6 +218,11 @@ def render_png(source, output, size):
     finally:
         if com is not None:
             com.CoUninitialize()
+
+
+def render_cropped_png(source, output, size):
+    return render_png(source, output, size, crop_margins=True)
+
 
 def usb_upload(settings, source, log, reader_id=None):
     import pythoncom
@@ -311,10 +363,12 @@ def pico_wake(port, log):
 class Processor:
     """Check WPD readiness separately from scheduled document renders."""
     def __init__(self, state_path=STATE, render=render_png, upload=usb_upload,
-                 wake=pico_wake, probe=usb_probe):
+                 wake=pico_wake, probe=usb_probe, cropped_render=None):
         self.state_path = state_path
         self.rendered = read_json(state_path, {})
         self.render, self.upload, self.wake, self.probe = render, upload, wake, probe
+        self.cropped_render = (cropped_render if cropped_render is not None
+                               else render_cropped_png if render is render_png else render)
         self.usb_ready = False
         self.reconnect_pending = False
         self.usb_key = None
@@ -385,7 +439,8 @@ class Processor:
                         or src.stat().st_mtime_ns != source_stat.st_mtime_ns):
                     return "Word 正在儲存，稍後重試"
                 log("正在轉換 " + src.name)
-                self.render(snapshot, dst, settings.size)
+                renderer = self.cropped_render if settings.custom_docx else self.render
+                renderer(snapshot, dst, settings.size)
             if sha256(src) != digest or src.stat().st_mtime_ns != source_stat.st_mtime_ns:
                 return "Word 已再更新，稍後重試最新版本"
             record = {**record, "source": digest, "png": sha256(dst),
@@ -572,26 +627,40 @@ def main():
         else:
             widget=ttk.Entry(frame,textvariable=fields[name],width=47)
         widget.grid(row=index,column=1,sticky="ew",padx=8)
-    ttk.Button(frame,text="瀏覽",command=lambda: fields["watch_dir"].set(filedialog.askdirectory() or fields["watch_dir"].get())).grid(row=0,column=2)
+    ttk.Button(frame,text="瀏覽",command=lambda: fields["watch_dir"].set(
+        filedialog.askdirectory() or fields["watch_dir"].get())).grid(row=0,column=2)
+    ttk.Label(frame,text="自訂 DOCX 檔案").grid(row=4,column=0,sticky="w",pady=5)
+    custom_docx = tk.StringVar(value=settings.custom_docx)
+    ttk.Entry(frame, textvariable=custom_docx, width=47).grid(
+        row=4,column=1,sticky="ew",padx=8)
+    docx_actions = ttk.Frame(frame)
+    docx_actions.grid(row=4,column=2,sticky="w")
+    ttk.Button(docx_actions, text="選檔",command=lambda: custom_docx.set(
+        filedialog.askopenfilename(title="選擇要顯示的 Word DOCX",
+            filetypes=[("Word DOCX", "*.docx")]) or custom_docx.get())).pack(side="left")
+    ttk.Button(docx_actions, text="清除",command=lambda: custom_docx.set("")).pack(side="left")
     enable_usb = tk.BooleanVar(value=settings.enable_usb)
     ttk.Checkbutton(frame,text="啟用 USB 自動更新 sleep 圖片",
-                    variable=enable_usb).grid(row=4,column=0,columnspan=3,sticky="w",pady=5)
+                    variable=enable_usb).grid(row=5,column=0,columnspan=3,sticky="w",pady=5)
     update_on_connect = tk.BooleanVar(value=settings.update_on_connect)
     update_on_file_change = tk.BooleanVar(value=settings.update_on_file_change)
     modes = ttk.LabelFrame(frame, text="自動更新觸發條件（可擇一或兩個都勾）", padding=6)
-    modes.grid(row=5,column=0,columnspan=3,sticky="ew",pady=4)
+    modes.grid(row=6,column=0,columnspan=3,sticky="ew",pady=4)
     ttk.Checkbutton(modes, text="插拔更新：USB 新連線／重新插入時立即同步",
                     variable=update_on_connect).pack(anchor="w")
     ttk.Checkbutton(modes, text="Polling file update：依設定秒數檢查 Word，變更後同步",
                     variable=update_on_file_change).pack(anchor="w")
-    ttk.Label(frame,text="依尺寸產生 mooink_display_10 / 13 的 PNG。\nUSB MTP 備份舊同名 PNG → 上傳 → SHA-256 回讀驗證 → Pico Space（選用）。\n可同時連接多台 mooInk，先以裝置 ID 配對尺寸。\n多裝置 USB 更新不會自動傳送 Pico Space。",wraplength=530).grid(row=7,column=0,columnspan=3,sticky="w",pady=8)
-    ttk.Label(frame,textvariable=connection_text).grid(row=6,column=0,columnspan=3,sticky="w")
-    ttk.Label(frame,textvariable=status_text,wraplength=550).grid(row=8,column=0,columnspan=3,sticky="w",pady=5)
+    ttk.Label(frame,text="可選任意 DOCX，自動裁除四周空白並保留最小白邊；清除則使用原本分尺寸 Word。\n依尺寸產生 mooink_display_10 / 13 的 PNG。\nUSB MTP 備份舊同名 PNG → 上傳 → SHA-256 回讀驗證 → Pico Space（選用）。\n可同時連接多台 mooInk，先以裝置 ID 配對尺寸。\n多裝置 USB 更新不會自動傳送 Pico Space。",wraplength=530).grid(row=8,column=0,columnspan=3,sticky="w",pady=8)
+    ttk.Label(frame,textvariable=connection_text).grid(row=7,column=0,columnspan=3,sticky="w")
+    ttk.Label(frame,textvariable=status_text,wraplength=550).grid(row=9,column=0,columnspan=3,sticky="w",pady=5)
     def save():
         nonlocal settings, force_pending
         try:
             values={k:v.get().strip() for k,v in fields.items()}
             values["interval_sec"]=int(values["interval_sec"])
+            values["custom_docx"] = custom_docx.get().strip()
+            if values["custom_docx"]:
+                values["custom_docx"] = str(Path(values["custom_docx"]).expanduser().resolve())
             values["enable_usb"] = bool(enable_usb.get())
             values["update_on_connect"] = bool(update_on_connect.get())
             values["update_on_file_change"] = bool(update_on_file_change.get())
@@ -603,14 +672,18 @@ def main():
                     return
             write_json(CONFIG,asdict(new))
             with settings_lock:
-                # Changing trigger settings must not become a manual force upload.
+                # Explicitly selecting another Word document requests an update
+                # right away, regardless of which automatic triggers are enabled.
+                # Toggling trigger switches alone must not force an upload.
+                force_pending = force_pending or (
+                    new.enable_usb and new.custom_docx != settings.custom_docx)
                 settings=new
             trigger.set()
             root.withdraw()
         except (ValueError,OSError) as exc:
             messagebox.showerror("設定錯誤", str(exc), parent=root)
     usb_box = ttk.LabelFrame(frame, text="USB MTP / Pico 測試", padding=8)
-    usb_box.grid(row=9,column=0,columnspan=3,sticky="ew",pady=(4,8))
+    usb_box.grid(row=10,column=0,columnspan=3,sticky="ew",pady=(4,8))
     usb_status = tk.StringVar(value="請接上 mooInk USB 資料線")
     ttk.Label(usb_box,textvariable=usb_status,wraplength=540).pack(anchor="w")
     buttons = ttk.Frame(usb_box)
@@ -655,11 +728,11 @@ def main():
         button.pack(side="left",padx=3)
         action_buttons.append(button)
     save_button = ttk.Button(frame,text="儲存並開始監控",command=save)
-    save_button.grid(row=10,column=1,sticky="e",pady=10)
+    save_button.grid(row=11,column=1,sticky="e",pady=10)
     action_buttons.append(save_button)
 
     preview_box = ttk.LabelFrame(frame, text="最後一次 USB SHA-256 驗證成功的圖片", padding=8)
-    preview_box.grid(row=11,column=0,columnspan=3,sticky="ew",pady=5)
+    preview_box.grid(row=12,column=0,columnspan=3,sticky="ew",pady=5)
     ttk.Label(preview_box,textvariable=success_text,wraplength=550).pack(anchor="w")
     ttk.Label(preview_box,textvariable=word_text,wraplength=550).pack(anchor="w")
     tree_columns = ("size", "state", "updated", "wordtime")

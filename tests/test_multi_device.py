@@ -110,3 +110,29 @@ if __name__ == "__main__":
             mgr.check(cfg)
             self.assertEqual(seen, [(ids[0], "10.3",False,True),
                                     (ids[1], "13.3",False,True)])
+
+
+    def test_selected_docx_shared_across_independent_reader_sizes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            custom = Path(tmp) / "weekly-report.docx"
+            custom.write_bytes(b"document")
+            reg = DeviceRegistry(Path(tmp) / "profiles.json")
+            ids = ("a" * 64, "b" * 64)
+            reg.assign(ids[0], "10.3", "A")
+            reg.assign(ids[1], "13.3", "B")
+            seen = []
+            class Fake:
+                def __init__(self, rid):
+                    self.rid = rid
+                def check(self, settings, **kwargs):
+                    seen.append((settings.paths()[0], settings.paths()[1].name))
+                    return "ok"
+            readers = [{"id": rid, "name": "Mooink", "ready": True, "pnp": rid}
+                       for rid in ids]
+            controller = MultiDeviceController(reg, Fake, lambda: readers,
+                                               lambda path, identity: False)
+            # Factory accepts reader ID and Fake stores it; source remains shared.
+            controller.check(Settings(watch_dir=tmp, enable_usb=True,
+                                      custom_docx=str(custom)))
+            self.assertEqual(seen, [(custom, "mooink_display_10.png"),
+                                    (custom, "mooink_display_13.png")])
