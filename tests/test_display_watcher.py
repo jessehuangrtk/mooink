@@ -437,7 +437,14 @@ class WatcherTests(unittest.TestCase):
             ImageDraw.Draw(page).rectangle((200, 250, 290, 340), fill=0)
             def pages(*args, **kwargs):
                 yield (1, page)
-            with patch("mooink_display_watcher.SleepScreenManager") as factory:
+            # Backend regression CI does not install pywin32. Mock the COM
+            # apartment lifecycle: the raster crop itself is platform neutral.
+            import sys
+            from types import SimpleNamespace
+            fake_com = SimpleNamespace(CoInitialize=lambda: None,
+                                       CoUninitialize=lambda: None)
+            with patch.dict(sys.modules, {"pythoncom": fake_com}), \
+                 patch("mooink_display_watcher.SleepScreenManager") as factory:
                 factory.return_value._pdf_pages.side_effect = pages
                 normal = Path(tmp) / "normal.png"
                 tight = Path(tmp) / "tight.png"
