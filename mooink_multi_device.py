@@ -167,3 +167,89 @@ class MultiDeviceController:
         except Exception as exc:
             log("成功上傳，但儲存本機驗證紀錄失敗：" + str(exc))
         success(device_id, result)
+
+
+def update_selected_docx(source, *, registry, discover, render, upload,
+                         on_success=lambda reader_id, data: None,
+                         on_status=lambda reader_id, message: None,
+                         log=lambda message: None):
+    """One-shot manual DOCX upload. Never changes automatic input or cache.
+
+    Render only into a temporary folder using reserved MTP PNG basenames.
+    Each paired reader receives a size-matched rendering and independent
+    verified success metadata. No automatic watcher settings are modified.
+    """
+    import hashlib
+    import shutil
+    import tempfile
+    import time
+
+    path = Path(source).expanduser().resolve()
+    if path.suffix.casefold() != ".docx" or not path.is_file():
+        raise ValueError("請先選擇存在的 DOCX 檔案")
+    original = path.stat()
+    checksum = hashlib.sha256(path.read_bytes()).digest()
+
+    def unchanged():
+        return (path.is_file()
+                and path.stat().st_mtime_ns == original.st_mtime_ns
+                and hashlib.sha256(path.read_bytes()).digest() == checksum)
+
+    readers = discover()
+    paired = []
+    for reader in readers:
+        if not reader.get("ready"):
+            continue
+        size = registry.lookup(reader["id"]).get("size")
+        if size in ("10.3", "13.3"):
+            paired.append((reader, size))
+        else:
+            on_status(reader["id"], "尚未配對尺寸，手動傳送略過")
+    if not paired:
+        raise RuntimeError("沒有已連線且已配對尺寸的 Mooink；請先在裝置管理中配對")
+
+    results = {"successful": [], "failed": []}
+    with tempfile.TemporaryDirectory(prefix="mooink_manual_") as temp:
+        work = Path(temp)
+        snapshot = work / path.name
+        shutil.copyfile(path, snapshot)
+        if not unchanged() or hashlib.sha256(snapshot.read_bytes()).digest() != checksum:
+            raise RuntimeError("Word 正在儲存，請儲存完成後重試")
+
+        rendered = {}
+        for size in sorted({size for _, size in paired}):
+            suffix = "10" if size == "10.3" else "13"
+            png = work / ("mooink_display_" + suffix + ".png")
+            render(snapshot, png, size)
+            if not png.is_file() or not png.stat().st_size:
+                raise RuntimeError("Word 轉圖失敗：" + str(png))
+            rendered[size] = png
+            log("手動轉圖完成：" + png.name)
+        if not unchanged():
+            raise RuntimeError("Word 在轉圖期間被修改，未傳送；請重試")
+
+        for reader, size in paired:
+            rid = reader["id"]
+            name = reader.get("name") or "Mooink"
+            try:
+                if not unchanged():
+                    raise RuntimeError("Word 在傳送期間被修改，請重試")
+                png = rendered[size]
+                upload(rid, png, size, log)
+                if not unchanged():
+                    raise RuntimeError("Word 在傳送期間被修改，請重試")
+                delivery = {
+                    "updated_at": time.time(), "word_mtime": original.st_mtime,
+                    "word_name": path.name, "png_name": png.name,
+                    "png_bytes": png.read_bytes()
+                }
+                registry.success(rid, delivery, size, name)
+                on_success(rid, delivery)
+                on_status(rid, "手動更新成功（SHA-256 回讀驗證）")
+                results["successful"].append(rid)
+            except Exception as exc:
+                message = "手動更新失敗：" + str(exc)
+                on_status(rid, message)
+                log(name + " [" + rid[:12] + "]: " + message)
+                results["failed"].append(rid)
+    return results

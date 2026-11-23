@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from mooink_multi_device import DeviceRegistry, MultiDeviceController
+from mooink_multi_device import DeviceRegistry, MultiDeviceController, update_selected_docx
 from mooink_display_watcher import Settings
 
 
@@ -136,3 +136,120 @@ if __name__ == "__main__":
                                       custom_docx=str(custom)))
             self.assertEqual(seen, [(custom, "mooink_display_10.png"),
                                     (custom, "mooink_display_13.png")])
+
+
+class ManualSelectedDocxTests(unittest.TestCase):
+    def test_manual_file_is_separate_from_auto_and_uses_size_specific_pngs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            auto = directory / "mooink_display_10.docx"
+            manual = directory / "completely-different.docx"
+            auto.write_bytes(b"automatic document")
+            manual.write_bytes(b"manual document")
+            auto_png = directory / "mooink_display_10.png"
+            auto_png.write_bytes(b"automatic PNG preserved")
+            reg = DeviceRegistry(directory / "profiles.json")
+            readers = [{"id":"a"*64,"name":"A","ready":True},
+                       {"id":"b"*64,"name":"B","ready":True}]
+            reg.assign(readers[0]["id"],"10.3","A")
+            reg.assign(readers[1]["id"],"13.3","B")
+            rendered, uploaded, delivered = [], [], []
+            def render(src, target, size):
+                rendered.append((src.read_bytes(), target.name, size))
+                target.write_bytes(("manual-PNG-" + size).encode())
+            def upload(reader_id, png, size, log):
+                uploaded.append((reader_id, png.name, png.read_bytes()))
+                return {"changed":True}
+            summary = update_selected_docx(
+                manual, registry=reg, discover=lambda:readers, render=render,
+                upload=upload, on_success=lambda rid,data:delivered.append((rid,data)))
+            self.assertEqual(len(summary["successful"]), 2)
+            self.assertEqual(len(summary["failed"]), 0)
+            self.assertEqual(rendered,
+                             [(b"manual document","mooink_display_10.png","10.3"),
+                              (b"manual document","mooink_display_13.png","13.3")])
+            self.assertEqual([(x[0],x[1]) for x in uploaded],
+                             [(readers[0]["id"],"mooink_display_10.png"),
+                              (readers[1]["id"],"mooink_display_13.png")])
+            self.assertEqual(len(delivered),2)
+            self.assertEqual(auto.read_bytes(),b"automatic document")
+            self.assertEqual(manual.read_bytes(),b"manual document")
+            self.assertEqual(auto_png.read_bytes(),b"automatic PNG preserved")
+            self.assertEqual(Settings(watch_dir=tmp).paths()[0], auto)
+            self.assertEqual(reg.lookup(readers[1]["id"])["word_name"],manual.name)
+
+    def test_manual_update_works_independently_of_usb_auto_switches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manual = Path(tmp)/"one-off.docx"
+            manual.write_bytes(b"oneoff")
+            reg = DeviceRegistry(Path(tmp)/"profiles.json")
+            rid = "a"*64
+            reg.assign(rid,"10.3","reader")
+            cfg = Settings(watch_dir=tmp,enable_usb=False,
+                           update_on_connect=False,update_on_file_change=False)
+            cfg.validate()
+            result = update_selected_docx(
+                manual,registry=reg,
+                discover=lambda:[{"id":rid,"name":"reader","ready":True}],
+                render=lambda src,dst,size:dst.write_bytes(b"png"),
+                upload=lambda rid,png,size,log:{"changed":False})
+            self.assertEqual(result["successful"],[rid])
+
+    def test_unpaired_reader_is_not_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manual = Path(tmp)/"one-off.docx"
+            manual.write_bytes(b"docx")
+            reg = DeviceRegistry(Path(tmp)/"profiles.json")
+            called = []
+            with self.assertRaisesRegex(RuntimeError,"已配對"):
+                update_selected_docx(manual,registry=reg,
+                    discover=lambda:[{"id":"a"*64,"name":"reader","ready":True}],
+                    render=lambda *args:called.append("render"),
+                    upload=lambda *args:called.append("upload"))
+            self.assertEqual(called,[])
+
+    def test_manual_failure_does_not_record_false_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manual = Path(tmp)/"one-off.docx"
+            manual.write_bytes(b"docx")
+            reg = DeviceRegistry(Path(tmp)/"profiles.json")
+            rid = "a"*64
+            reg.assign(rid,"13.3","reader")
+            results = update_selected_docx(
+                manual,registry=reg,
+                discover=lambda:[{"id":rid,"name":"reader","ready":True}],
+                render=lambda src,dst,size:dst.write_bytes(b"png"),
+                upload=lambda rid,png,size,log: (_ for _ in ()).throw(OSError("USB lost")))
+            self.assertEqual(results["successful"],[])
+            self.assertEqual(results["failed"],[rid])
+            self.assertNotIn("last_updated",reg.lookup(rid))
+
+    def test_manual_document_changed_during_render_blocks_transfer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manual = Path(tmp)/"one-off.docx"
+            manual.write_bytes(b"first")
+            reg = DeviceRegistry(Path(tmp)/"profiles.json")
+            rid = "a"*64
+            reg.assign(rid,"10.3","reader")
+            uploaded = []
+            def render(src,dst,size):
+                dst.write_bytes(b"png")
+                manual.write_bytes(b"second")
+            with self.assertRaisesRegex(RuntimeError,"轉圖期間被修改"):
+                update_selected_docx(manual,registry=reg,
+                    discover=lambda:[{"id":rid,"name":"reader","ready":True}],
+                    render=render,
+                    upload=lambda *args:uploaded.append(1))
+            self.assertEqual(uploaded,[])
+            self.assertNotIn("last_updated",reg.lookup(rid))
+
+    def test_manual_source_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = DeviceRegistry(Path(tmp)/"profiles.json")
+            wrong = Path(tmp)/"something.txt"
+            wrong.write_bytes(b"bad")
+            for selected in (wrong,Path(tmp)/"missing.docx"):
+                with self.assertRaises(ValueError):
+                    update_selected_docx(selected,registry=reg,
+                        discover=lambda:[],render=lambda *args:None,
+                        upload=lambda *args:None)

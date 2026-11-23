@@ -21,10 +21,11 @@ from dataclasses import dataclass, asdict, replace
 import uuid
 
 from mook_sleep_screen_manager import SleepScreenManager, RESOLUTIONS
-from mooink_multi_device import DeviceRegistry, MultiDeviceController
+from mooink_multi_device import DeviceRegistry, MultiDeviceController, update_selected_docx
 
 CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "mooink"
 CONFIG = CONFIG_DIR / "mooink_display_watcher.json"
+MANUAL_SELECTION = CONFIG_DIR / "mooink_manual_docx.json"
 STATE = CONFIG_DIR / "mooink_display_watcher_state.json"
 LOG = CONFIG_DIR / "mooink_display_watcher.log"
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -528,6 +529,7 @@ def main():
     events = queue.Queue()
     stop, trigger = threading.Event(), threading.Event()
     hotplug_events = queue.Queue()
+    manual_requests = queue.Queue()
     def notify_device(path):
         hotplug_events.put(path)
         trigger.set()
@@ -610,6 +612,34 @@ def main():
             if result is not None and (result != previous or force):
                 publish(result)
                 previous = result
+            # Explicit manual updates run after auto checks. This way any
+            # current scheduled update cannot immediately replace the selected
+            # one-off document on the reader.
+            while not stop.is_set():
+                try:
+                    selected = manual_requests.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    with operation_lock:
+                        summary = update_selected_docx(
+                            selected, registry=registry, discover=usb_readers,
+                            render=render_cropped_png,
+                            upload=lambda rid, png, size, logger: usb_upload(
+                                replace(current, size=size), png, logger, rid),
+                            on_success=lambda rid, data: events.put(
+                                ("device_success", (rid, data))),
+                            on_status=lambda rid, msg: events.put(
+                                ("device_status", (rid, msg))),
+                            log=publish)
+                    info = "手動 DOCX 更新：%d 台成功、%d 台失敗" % (
+                        len(summary["successful"]), len(summary["failed"]))
+                    publish(info)
+                    events.put(("manual_docx_done", (info, bool(summary["failed"]))))
+                except Exception as exc:
+                    info = "手動 DOCX 更新失敗：" + str(exc)
+                    publish(info)
+                    events.put(("manual_docx_done", (info, True)))
             remaining = max(0.0, next_check - time.monotonic())
             trigger.wait(min(USB_POLL_SEC, remaining) if current.enable_usb else remaining)
 
@@ -629,30 +659,64 @@ def main():
         widget.grid(row=index,column=1,sticky="ew",padx=8)
     ttk.Button(frame,text="瀏覽",command=lambda: fields["watch_dir"].set(
         filedialog.askdirectory() or fields["watch_dir"].get())).grid(row=0,column=2)
-    ttk.Label(frame,text="自訂 DOCX 檔案").grid(row=4,column=0,sticky="w",pady=5)
+    ttk.Label(frame,text="自動更新 DOCX（選填）").grid(row=4,column=0,sticky="w",pady=5)
     custom_docx = tk.StringVar(value=settings.custom_docx)
     ttk.Entry(frame, textvariable=custom_docx, width=47).grid(
         row=4,column=1,sticky="ew",padx=8)
     docx_actions = ttk.Frame(frame)
     docx_actions.grid(row=4,column=2,sticky="w")
     ttk.Button(docx_actions, text="選檔",command=lambda: custom_docx.set(
-        filedialog.askopenfilename(title="選擇要顯示的 Word DOCX",
+        filedialog.askopenfilename(title="選擇自動監控的 Word DOCX",
             filetypes=[("Word DOCX", "*.docx")]) or custom_docx.get())).pack(side="left")
     ttk.Button(docx_actions, text="清除",command=lambda: custom_docx.set("")).pack(side="left")
+
+    # One-shot manual DOCX is independent of the automatic monitored source.
+    saved_manual = read_json(MANUAL_SELECTION, {}).get("docx", "")
+    manual_docx = tk.StringVar(value=saved_manual if isinstance(saved_manual, str) else "")
+    manual_docx_busy = False
+    ttk.Label(frame,text="手動選檔 DOCX").grid(row=5,column=0,sticky="w",pady=5)
+    ttk.Entry(frame,textvariable=manual_docx,width=47).grid(
+        row=5,column=1,sticky="ew",padx=8)
+    manual_actions = ttk.Frame(frame)
+    manual_actions.grid(row=5,column=2,sticky="w")
+    ttk.Button(manual_actions, text="選檔", command=lambda: manual_docx.set(
+        filedialog.askopenfilename(title="選擇這次手動傳送的 Word DOCX",
+            filetypes=[("Word DOCX", "*.docx")]) or manual_docx.get())).pack(side="left")
+    def manual_update_click():
+        nonlocal manual_docx_busy
+        if manual_docx_busy:
+            return
+        selected = Path(manual_docx.get().strip()).expanduser().resolve()
+        if selected.suffix.casefold() != ".docx" or not selected.is_file():
+            messagebox.showerror("選檔錯誤","請先選擇存在的 DOCX 檔案",parent=root)
+            return
+        try:
+            write_json(MANUAL_SELECTION, {"docx": str(selected)})
+        except OSError as exc:
+            messagebox.showerror("儲存選檔失敗",str(exc),parent=root)
+            return
+        manual_docx_busy = True
+        manual_update_button.configure(state="disabled")
+        publish("手動 DOCX 更新已排入工作：" + selected.name)
+        manual_requests.put(selected)
+        trigger.set()
+    manual_update_button = ttk.Button(
+        manual_actions, text="立即更新", command=manual_update_click)
+    manual_update_button.pack(side="left",padx=(5,0))
     enable_usb = tk.BooleanVar(value=settings.enable_usb)
     ttk.Checkbutton(frame,text="啟用 USB 自動更新 sleep 圖片",
-                    variable=enable_usb).grid(row=5,column=0,columnspan=3,sticky="w",pady=5)
+                    variable=enable_usb).grid(row=6,column=0,columnspan=3,sticky="w",pady=5)
     update_on_connect = tk.BooleanVar(value=settings.update_on_connect)
     update_on_file_change = tk.BooleanVar(value=settings.update_on_file_change)
     modes = ttk.LabelFrame(frame, text="自動更新觸發條件（可擇一或兩個都勾）", padding=6)
-    modes.grid(row=6,column=0,columnspan=3,sticky="ew",pady=4)
+    modes.grid(row=7,column=0,columnspan=3,sticky="ew",pady=4)
     ttk.Checkbutton(modes, text="插拔更新：USB 新連線／重新插入時立即同步",
                     variable=update_on_connect).pack(anchor="w")
     ttk.Checkbutton(modes, text="Polling file update：依設定秒數檢查 Word，變更後同步",
                     variable=update_on_file_change).pack(anchor="w")
-    ttk.Label(frame,text="可選任意 DOCX，自動裁除四周空白並保留最小白邊；清除則使用原本分尺寸 Word。\n依尺寸產生 mooink_display_10 / 13 的 PNG。\nUSB MTP 備份舊同名 PNG → 上傳 → SHA-256 回讀驗證 → Pico Space（選用）。\n可同時連接多台 mooInk，先以裝置 ID 配對尺寸。\n多裝置 USB 更新不會自動傳送 Pico Space。",wraplength=530).grid(row=8,column=0,columnspan=3,sticky="w",pady=8)
-    ttk.Label(frame,textvariable=connection_text).grid(row=7,column=0,columnspan=3,sticky="w")
-    ttk.Label(frame,textvariable=status_text,wraplength=550).grid(row=9,column=0,columnspan=3,sticky="w",pady=5)
+    ttk.Label(frame,text="手動選檔後按「立即更新」會裁白邊並傳送，不更動自動監控檔案。\n自動更新 DOCX 清空時依尺寸使用預設 Word。\n依尺寸產生 mooink_display_10 / 13 的 PNG。\nUSB MTP 備份舊同名 PNG → 上傳 → SHA-256 回讀驗證 → Pico Space（選用）。\n可同時連接多台 mooInk，先以裝置 ID 配對尺寸。\n多裝置 USB 更新不會自動傳送 Pico Space。",wraplength=530).grid(row=9,column=0,columnspan=3,sticky="w",pady=8)
+    ttk.Label(frame,textvariable=connection_text).grid(row=8,column=0,columnspan=3,sticky="w")
+    ttk.Label(frame,textvariable=status_text,wraplength=550).grid(row=10,column=0,columnspan=3,sticky="w",pady=5)
     def save():
         nonlocal settings, force_pending
         try:
@@ -683,7 +747,7 @@ def main():
         except (ValueError,OSError) as exc:
             messagebox.showerror("設定錯誤", str(exc), parent=root)
     usb_box = ttk.LabelFrame(frame, text="USB MTP / Pico 測試", padding=8)
-    usb_box.grid(row=10,column=0,columnspan=3,sticky="ew",pady=(4,8))
+    usb_box.grid(row=11,column=0,columnspan=3,sticky="ew",pady=(4,8))
     usb_status = tk.StringVar(value="請接上 mooInk USB 資料線")
     ttk.Label(usb_box,textvariable=usb_status,wraplength=540).pack(anchor="w")
     buttons = ttk.Frame(usb_box)
@@ -728,11 +792,11 @@ def main():
         button.pack(side="left",padx=3)
         action_buttons.append(button)
     save_button = ttk.Button(frame,text="儲存並開始監控",command=save)
-    save_button.grid(row=11,column=1,sticky="e",pady=10)
+    save_button.grid(row=12,column=1,sticky="e",pady=10)
     action_buttons.append(save_button)
 
     preview_box = ttk.LabelFrame(frame, text="最後一次 USB SHA-256 驗證成功的圖片", padding=8)
-    preview_box.grid(row=12,column=0,columnspan=3,sticky="ew",pady=5)
+    preview_box.grid(row=13,column=0,columnspan=3,sticky="ew",pady=5)
     ttk.Label(preview_box,textvariable=success_text,wraplength=550).pack(anchor="w")
     ttk.Label(preview_box,textvariable=word_text,wraplength=550).pack(anchor="w")
     tree_columns = ("size", "state", "updated", "wordtime")
@@ -851,7 +915,7 @@ def main():
         pystray.MenuItem("結束",tray_action("exit"))))
     thread=threading.Thread(target=worker,daemon=True)
     def drain():
-        nonlocal force_pending, manual_busy
+        nonlocal force_pending, manual_busy, manual_docx_busy
         while True:
             try:
                 action,value=events.get_nowait()
@@ -879,6 +943,13 @@ def main():
             elif action=="success":
                 # Legacy one-device renderer compatibility (USB disabled).
                 pass
+            elif action=="manual_docx_done":
+                manual_docx_busy = False
+                manual_update_button.configure(state="normal")
+                message, failed = value
+                status_text.set(message)
+                if failed:
+                    messagebox.showwarning("手動 DOCX 更新", message, parent=root)
             elif action=="manual_result":
                 operation, result, error = value
                 manual_busy = False

@@ -107,3 +107,21 @@ ARBITRARY DOCX SOURCE AND MINIMAL MARGINS
 - Both the hot-plug and file-polling trigger options apply to the chosen DOCX.
   File-polling uses the selected document's content/hash and modification time.
   Changing the file selection creates a new render cache key.
+
+MANUAL SELECT FILE (SEPARATE FROM AUTOMATIC WATCHING)
+- The "Automatic DOCX" field selects the source for hot-plug/file-polling
+  updates; leave blank to monitor the normal size-specific DOCX files.
+- The new "Manual DOCX" row has its own file browser and "Update now" button.
+  Manual selection does NOT change the automatic DOCX or its polling interval,
+  watcher config, cached render hashes, or locally generated automatic PNGs.
+- Press "Update now" to crop whitespace from that independent DOCX into
+  temporary size-specific PNGs and send them to every connected, paired Mooink.
+  Results and previews are recorded per reader after MTP SHA-256 verification.
+  No device, unpaired device, or transfer failure produces a false success.
+- Manual transfer works regardless of whether USB auto-update or either
+  automatic trigger is enabled. The manual file path is remembered separately
+  in %LOCALAPPDATA%\mooink\mooink_manual_docx.json.
+- A later *actual* automatic trigger can replace the manually uploaded image
+  with the automatic Word source. No manual operation edits the source DOCX.
+- If the manual document has more than one page, conversion still rejects it;
+  only one-page documents are currently supported.
