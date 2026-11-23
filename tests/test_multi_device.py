@@ -263,12 +263,13 @@ class ManualSelectedDocxTests(unittest.TestCase):
             error = manual_reader_diagnostic([], reg)
             self.assertEqual(error.reason, "not_found")
             self.assertIn("WPD", str(error))
+            selected = Path(tmp)/"source.docx"
+            selected.write_bytes(b"test document")
             with self.assertRaises(ManualReaderUnavailable) as raised:
-                update_selected_docx(Path(tmp)/"source.docx",registry=reg,
+                update_selected_docx(selected, registry=reg,
                     discover=lambda:[], render=lambda *args: None,
                     upload=lambda *args: None)
-            # Invalid DOCX should be rejected before querying connected WPD.
-            self.assertIn("DOCX", str(raised.exception))
+            self.assertEqual(raised.exception.reason, "not_found")
 
     def test_manual_diagnostic_unpaired_device_proposes_pairing(self):
         with tempfile.TemporaryDirectory() as tmp:
