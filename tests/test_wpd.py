@@ -451,3 +451,15 @@ class MultipleReaderTests(unittest.TestCase):
                 replace_watch_image(path,Path(tmp)/"backup",
                                     device_source=lambda:[d1], reader_id="0"*64)
             self.assertEqual(len(folder.children), 1)
+
+
+class ListReaderDiagnosticTests(unittest.TestCase):
+    def test_not_ready_reader_still_appears_with_error(self):
+        from mook_mtp_wpd import list_readers
+        device = FakeDevice("mooInk Pro")
+        device._p_id = "WPD_MOOINK_DIAGNOSTIC_01"
+        output = list_readers(device_source=lambda: [device])
+        self.assertEqual(len(output), 1)
+        self.assertFalse(output[0]["ready"])
+        self.assertIn("sleep", output[0]["error"])
+        self.assertTrue(device.closed)

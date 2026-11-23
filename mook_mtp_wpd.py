@@ -517,14 +517,17 @@ def list_readers(*, device_source=None):
                 key = _reader_id(dev)
             except QuietMtpUnavailable:
                 continue
+            error = ""
             try:
                 _sleep_directory(dev)
                 ready = True
-            except Exception:
+            except Exception as exc:
                 # WPD COM errors are not guaranteed to subclass OSError.
                 # A not-yet-mounted reader must not hide other devices.
                 ready = False
+                error = str(exc)[:250]
             output.append({"id": key, "name": _device_name(dev), "ready": ready,
+                           "error": error,
                            "pnp": str(getattr(dev, "_p_id", "") or "")})
         if len({reader["id"] for reader in output}) != len(output):
             raise QuietMtpUnavailable("WPD 裝置 ID 重複，拒絕自動更新")

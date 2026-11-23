@@ -125,3 +125,18 @@ MANUAL SELECT FILE (SEPARATE FROM AUTOMATIC WATCHING)
   with the automatic Word source. No manual operation edits the source DOCX.
 - If the manual document has more than one page, conversion still rejects it;
   only one-page documents are currently supported.
+
+TROUBLESHOOTING MANUAL DOCX: NO CONNECTED/PAIRED MOOINK
+- "Update now" requires the device to be recognized in Windows WPD,
+  its sleep folder accessible, and its ID paired to the physical panel size.
+- The manual update UI now distinguishes three cases:
+  * WPD finds no compatible Mooink: verify Windows Explorer, data USB cable,
+    and device connection. Open "Manage devices / size pairing" to inspect.
+  * Device found but sleep not accessible: reconnect/unlock the reader,
+    then inspect the WPD/sleep error in the status.
+  * Device connected but never size-paired: the GUI automatically opens
+    size pairing. Choose the real 10.3 or 13.3-inch size, save, and the same
+    manual DOCX will be retried without selecting it again.
+- The first pairing is intentional: the WPD ID cannot reliably encode
+  physical screen size. An unpaired device must not receive any uploads.
+- No changes to the automatic monitored Word source or PNG files are made.

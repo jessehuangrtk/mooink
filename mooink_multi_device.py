@@ -169,6 +169,44 @@ class MultiDeviceController:
         success(device_id, result)
 
 
+class ManualReaderUnavailable(RuntimeError):
+    """No safe manual upload target; caller may offer first-time pairing."""
+
+    def __init__(self, reason, readers, detail):
+        super().__init__(detail)
+        self.reason = reason
+        self.readers = list(readers)
+
+
+def manual_reader_diagnostic(readers, registry):
+    """Explain which safety gate blocked upload; never guess panel size."""
+    readers = list(readers)
+    if not readers:
+        return ManualReaderUnavailable(
+            "not_found", readers,
+            "WPD 沒有找到相容的 Mooink。請確認 Windows 檔案總管能看到閱讀器、"
+            "USB 使用資料線，並檢查「管理裝置／尺寸配對」清單。")
+    ready = [reader for reader in readers if reader.get("ready")]
+    if not ready:
+        details = "; ".join(
+            (reader.get("name") or "Mooink") + "：" +
+            (reader.get("error") or "sleep 資料夾尚無法存取")
+            for reader in readers)
+        return ManualReaderUnavailable(
+            "not_ready", readers,
+            "找到 %d 台 Mooink，但 WPD/sleep 尚未就緒。%s。請重新插拔、解鎖裝置並確認 sleep 目錄可讀。"
+            % (len(readers), details))
+    unpaired = [reader for reader in ready
+                if registry.lookup(reader["id"]).get("size") not in ("10.3", "13.3")]
+    if unpaired:
+        return ManualReaderUnavailable(
+            "unpaired", readers,
+            "找到 %d 台已連線 Mooink，其中 %d 台尚未建立裝置 ID／尺寸配對。"
+            "請先選擇 10.3 或 13.3 吋，儲存後即可傳送。"
+            % (len(ready), len(unpaired)))
+    return None
+
+
 def update_selected_docx(source, *, registry, discover, render, upload,
                          on_success=lambda reader_id, data: None,
                          on_status=lambda reader_id, message: None,
@@ -206,7 +244,7 @@ def update_selected_docx(source, *, registry, discover, render, upload,
         else:
             on_status(reader["id"], "尚未配對尺寸，手動傳送略過")
     if not paired:
-        raise RuntimeError("沒有已連線且已配對尺寸的 Mooink；請先在裝置管理中配對")
+        raise manual_reader_diagnostic(readers, registry)
 
     results = {"successful": [], "failed": []}
     with tempfile.TemporaryDirectory(prefix="mooink_manual_") as temp:

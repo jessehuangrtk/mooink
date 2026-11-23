@@ -21,7 +21,8 @@ from dataclasses import dataclass, asdict, replace
 import uuid
 
 from mook_sleep_screen_manager import SleepScreenManager, RESOLUTIONS
-from mooink_multi_device import DeviceRegistry, MultiDeviceController, update_selected_docx
+from mooink_multi_device import (DeviceRegistry, MultiDeviceController,
+                                 update_selected_docx, ManualReaderUnavailable)
 
 CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "mooink"
 CONFIG = CONFIG_DIR / "mooink_display_watcher.json"
@@ -636,6 +637,10 @@ def main():
                         len(summary["successful"]), len(summary["failed"]))
                     publish(info)
                     events.put(("manual_docx_done", (info, bool(summary["failed"]))))
+                except ManualReaderUnavailable as exc:
+                    publish("手動 DOCX 等待裝置：" + str(exc))
+                    events.put(("manual_reader_help",
+                                (selected, exc.reason, exc.readers, str(exc))))
                 except Exception as exc:
                     info = "手動 DOCX 更新失敗：" + str(exc)
                     publish(info)
@@ -855,7 +860,8 @@ def main():
     device_tree.bind("<<TreeviewSelect>>", on_select_device)
     populate_tree()
 
-    def open_device_pairing(readers):
+    def open_device_pairing(readers, *, retry_manual=None):
+        nonlocal manual_docx_busy
         if not readers:
             messagebox.showinfo("裝置配對", "目前未偵測到 Mooink。插入 USB 後再試一次。", parent=root)
             return
@@ -883,8 +889,19 @@ def main():
             if index >= 0:
                 selected_size.set(registry.lookup(readers[index]["id"]).get("size", ""))
         picker.bind("<<ComboboxSelected>>", selected)
-        picker.current(0)
+        suggested = next((index for index, reader in enumerate(readers)
+                          if reader.get("ready") and
+                          registry.lookup(reader["id"]).get("size")
+                          not in ("10.3", "13.3")), 0)
+        picker.current(suggested)
         selected()
+        def close_pairing():
+            nonlocal manual_docx_busy
+            if retry_manual is not None:
+                manual_docx_busy = False
+                manual_update_button.configure(state="normal")
+            dialog.destroy()
+        dialog.protocol("WM_DELETE_WINDOW", close_pairing)
         def assign():
             nonlocal force_pending
             index = picker.current()
@@ -897,12 +914,18 @@ def main():
             except Exception as exc:
                 messagebox.showerror("配對失敗", str(exc), parent=dialog)
                 return
-            with settings_lock:
-                force_pending = True
+            if retry_manual is not None:
+                # First-time pairing should resume the SAME manual DOCX, not
+                # queue an automatic DOCX update that may overwrite it.
+                manual_requests.put(retry_manual)
+            else:
+                with settings_lock:
+                    force_pending = True
             trigger.set()
             populate_tree()
             dialog.destroy()
-        ttk.Button(dialog,text="儲存此裝置尺寸",command=assign).pack(pady=14)
+        ttk.Button(dialog,text="儲存此裝置尺寸並繼續" if retry_manual is not None
+                   else "儲存此裝置尺寸",command=assign).pack(pady=14)
 
     root.protocol("WM_DELETE_WINDOW",root.withdraw)
     def tray_action(action):
@@ -950,6 +973,19 @@ def main():
                 status_text.set(message)
                 if failed:
                     messagebox.showwarning("手動 DOCX 更新", message, parent=root)
+            elif action=="manual_reader_help":
+                selected, reason, readers, detail = value
+                status_text.set(detail)
+                if reason == "unpaired":
+                    # If the model knows the device but not its size, guide the
+                    # first-time pairing and automatically retry the pending DOCX.
+                    root.deiconify()
+                    root.lift()
+                    open_device_pairing(readers, retry_manual=selected)
+                else:
+                    manual_docx_busy = False
+                    manual_update_button.configure(state="normal")
+                    messagebox.showwarning("Mooink USB 裝置狀態", detail, parent=root)
             elif action=="manual_result":
                 operation, result, error = value
                 manual_busy = False

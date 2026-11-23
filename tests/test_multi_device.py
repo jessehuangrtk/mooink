@@ -4,7 +4,9 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
-from mooink_multi_device import DeviceRegistry, MultiDeviceController, update_selected_docx
+from mooink_multi_device import (DeviceRegistry, MultiDeviceController,
+                                 update_selected_docx, ManualReaderUnavailable,
+                                 manual_reader_diagnostic)
 from mooink_display_watcher import Settings
 
 
@@ -201,7 +203,7 @@ class ManualSelectedDocxTests(unittest.TestCase):
             manual.write_bytes(b"docx")
             reg = DeviceRegistry(Path(tmp)/"profiles.json")
             called = []
-            with self.assertRaisesRegex(RuntimeError,"已配對"):
+            with self.assertRaisesRegex(ManualReaderUnavailable,"尺寸配對"):
                 update_selected_docx(manual,registry=reg,
                     discover=lambda:[{"id":"a"*64,"name":"reader","ready":True}],
                     render=lambda *args:called.append("render"),
@@ -253,3 +255,61 @@ class ManualSelectedDocxTests(unittest.TestCase):
                     update_selected_docx(selected,registry=reg,
                         discover=lambda:[],render=lambda *args:None,
                         upload=lambda *args:None)
+
+
+    def test_manual_diagnostic_when_wpd_has_no_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = DeviceRegistry(Path(tmp)/"profiles.json")
+            error = manual_reader_diagnostic([], reg)
+            self.assertEqual(error.reason, "not_found")
+            self.assertIn("WPD", str(error))
+            with self.assertRaises(ManualReaderUnavailable) as raised:
+                update_selected_docx(Path(tmp)/"source.docx",registry=reg,
+                    discover=lambda:[], render=lambda *args: None,
+                    upload=lambda *args: None)
+            # Invalid DOCX should be rejected before querying connected WPD.
+            self.assertIn("DOCX", str(raised.exception))
+
+    def test_manual_diagnostic_unpaired_device_proposes_pairing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = DeviceRegistry(Path(tmp)/"profiles.json")
+            manual = Path(tmp)/"selected.docx"
+            manual.write_bytes(b"word")
+            readers = [{"id":"a"*64,"name":"Mooink","ready":True}]
+            error = manual_reader_diagnostic(readers, reg)
+            self.assertEqual(error.reason, "unpaired")
+            self.assertEqual(error.readers, readers)
+            with self.assertRaises(ManualReaderUnavailable) as raised:
+                update_selected_docx(manual, registry=reg, discover=lambda:readers,
+                    render=lambda *args:None,upload=lambda *args:None)
+            self.assertEqual(raised.exception.reason, "unpaired")
+            reg.assign("a"*64, "10.3", "Mooink")
+            self.assertIsNone(manual_reader_diagnostic(readers, reg))
+            delivered = update_selected_docx(manual, registry=reg, discover=lambda:readers,
+                render=lambda src,dst,size:dst.write_bytes(b"png"),
+                upload=lambda *args:None)
+            self.assertEqual(delivered["successful"],["a"*64])
+
+    def test_manual_diagnostic_unready_reader_shows_actual_wpd_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = DeviceRegistry(Path(tmp)/"profiles.json")
+            readers = [{"id":"a"*64,"name":"Mooink","ready":False,
+                        "error":"sleep 資料夾不存在"}]
+            error = manual_reader_diagnostic(readers, reg)
+            self.assertEqual(error.reason, "not_ready")
+            self.assertIn("sleep 資料夾不存在", str(error))
+
+    def test_manual_with_registered_reader_and_another_unpaired_still_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = DeviceRegistry(Path(tmp)/"profiles.json")
+            reg.assign("a"*64, "10.3", "A")
+            docx = Path(tmp)/"manual.docx"
+            docx.write_bytes(b"docx")
+            devices = [{"id":"a"*64,"name":"A","ready":True},
+                       {"id":"b"*64,"name":"B","ready":True}]
+            result = update_selected_docx(docx,registry=reg,discover=lambda:devices,
+                    render=lambda src,dst,size:dst.write_bytes(b"png"),
+                    upload=lambda *args:None)
+            self.assertEqual(result["successful"],["a"*64])
+            self.assertEqual(result["failed"],[])
+            self.assertNotIn("size",reg.lookup("b"*64))
