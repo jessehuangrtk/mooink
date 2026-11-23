@@ -208,7 +208,7 @@ def manual_reader_diagnostic(readers, registry):
 
 
 def update_selected_docx(source, *, registry, discover, render, upload,
-                         on_success=lambda reader_id, data: None,
+                         page_number=1, on_success=lambda reader_id, data: None,
                          on_status=lambda reader_id, message: None,
                          log=lambda message: None):
     """One-shot manual DOCX upload. Never changes automatic input or cache.
@@ -225,6 +225,8 @@ def update_selected_docx(source, *, registry, discover, render, upload,
     path = Path(source).expanduser().resolve()
     if path.suffix.casefold() != ".docx" or not path.is_file():
         raise ValueError("請先選擇存在的 DOCX 檔案")
+    if not isinstance(page_number, int) or page_number < 1:
+        raise ValueError("手動傳送頁碼必須從 1 開始")
     original = path.stat()
     checksum = hashlib.sha256(path.read_bytes()).digest()
 
@@ -278,7 +280,9 @@ def update_selected_docx(source, *, registry, discover, render, upload,
                     raise RuntimeError("Word 在傳送期間被修改，請重試")
                 delivery = {
                     "updated_at": time.time(), "word_mtime": original.st_mtime,
-                    "word_name": path.name, "png_name": png.name,
+                    "word_name": path.name + ("（第%d頁）" % page_number
+                        if page_number > 1 else ""), "png_name": png.name,
+                    "page_number": page_number,
                     "png_bytes": png.read_bytes()
                 }
                 registry.success(rid, delivery, size, name)

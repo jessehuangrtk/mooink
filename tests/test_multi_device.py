@@ -314,3 +314,23 @@ class ManualSelectedDocxTests(unittest.TestCase):
             self.assertEqual(result["successful"],["a"*64])
             self.assertEqual(result["failed"],[])
             self.assertNotIn("size",reg.lookup("b"*64))
+
+
+    def test_manually_selected_page_is_recorded_without_pollution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "multi.docx"
+            source.write_bytes(b"three-page-file")
+            reg = DeviceRegistry(Path(tmp)/"paired.json")
+            rid="a"*64
+            reg.assign(rid,"10.3","A")
+            captured=[]
+            result = update_selected_docx(
+                source,registry=reg,discover=lambda:[{"id":rid,"name":"A","ready":True}],
+                render=lambda src,dst,size:dst.write_bytes(b"page 3 png"),
+                upload=lambda *args:None, page_number=3,
+                on_success=lambda _,data:captured.append(data))
+            self.assertEqual(result["successful"],[rid])
+            self.assertEqual(captured[0]["page_number"],3)
+            self.assertIn("第3頁",reg.lookup(rid)["word_name"])
+            self.assertEqual(reg.lookup(rid)["png_name"],"mooink_display_10.png")
+

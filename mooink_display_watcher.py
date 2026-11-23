@@ -23,6 +23,7 @@ import uuid
 from mook_sleep_screen_manager import SleepScreenManager, RESOLUTIONS
 from mooink_multi_device import (DeviceRegistry, MultiDeviceController,
                                  update_selected_docx, ManualReaderUnavailable)
+from mooink_docx_pages import prepare_docx_preview, render_document_page, render_selected_page_png
 
 CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "mooink"
 CONFIG = CONFIG_DIR / "mooink_display_watcher.json"
@@ -79,6 +80,7 @@ class Settings:
     update_on_connect: bool = True  # initial USB connection and reconnection
     update_on_file_change: bool = True  # scheduled DOCX checks
     custom_docx: str = ""  # blank: size-specific DOCX in watch_dir
+    stay_resident: bool = False  # closing window quits unless explicitly enabled
 
     def validate(self):
         if self.enable_usb and not (self.update_on_connect or self.update_on_file_change):
@@ -525,12 +527,13 @@ def main():
     settings = load_settings()
     root = tk.Tk()
     root.withdraw()
-    root.title("mooInk Display Watcher 設定")
-    root.resizable(False, False)
+    root.title("mooInk Display Watcher")
+    root.resizable(True, True)
     events = queue.Queue()
     stop, trigger = threading.Event(), threading.Event()
     hotplug_events = queue.Queue()
     manual_requests = queue.Queue()
+    preview_storage = tempfile.TemporaryDirectory(prefix="mooink_page_preview_")
     def notify_device(path):
         hotplug_events.put(path)
         trigger.set()
@@ -618,14 +621,21 @@ def main():
             # one-off document on the reader.
             while not stop.is_set():
                 try:
-                    selected = manual_requests.get_nowait()
+                    manual_request = manual_requests.get_nowait()
                 except queue.Empty:
                     break
+                selected, chosen_preview, chosen_page = manual_request
                 try:
+                    if (chosen_preview is None
+                            or chosen_preview.source != selected
+                            or not chosen_preview.source_unchanged()):
+                        raise RuntimeError("Word 自預覽後已變更，請重新選擇檔案及頁面")
                     with operation_lock:
                         summary = update_selected_docx(
                             selected, registry=registry, discover=usb_readers,
-                            render=render_cropped_png,
+                            page_number=chosen_page,
+                            render=lambda docx, png, size: render_selected_page_png(
+                                chosen_preview, chosen_page, size, png),
                             upload=lambda rid, png, size, logger: usb_upload(
                                 replace(current, size=size), png, logger, rid),
                             on_success=lambda rid, data: events.put(
@@ -640,7 +650,7 @@ def main():
                 except ManualReaderUnavailable as exc:
                     publish("手動 DOCX 等待裝置：" + str(exc))
                     events.put(("manual_reader_help",
-                                (selected, exc.reason, exc.readers, str(exc))))
+                                (manual_request, exc.reason, exc.readers, str(exc))))
                 except Exception as exc:
                     info = "手動 DOCX 更新失敗：" + str(exc)
                     publish(info)
@@ -648,9 +658,152 @@ def main():
             remaining = max(0.0, next_check - time.monotonic())
             trigger.wait(min(USB_POLL_SEC, remaining) if current.enable_usb else remaining)
 
+    # Two-column layout. The left pane exists in both modes; all settings are
+    # on the right and are not packed until advanced mode is selected.
+    style = ttk.Style(root)
+    style.theme_use("clam")
+    layout = ttk.Frame(root)
+    layout.pack(fill="both", expand=True)
+    left = ttk.Frame(layout, padding=12, width=520, height=735)
+    left.pack(side="left", fill="both", expand=True)
+    left.pack_propagate(False)
+    frame = ttk.Frame(layout, padding=12)
     fields = {}
-    frame = ttk.Frame(root, padding=15)
-    frame.pack(fill="both", expand=True)
+    mode_advanced = False
+
+    saved_manual = read_json(MANUAL_SELECTION, {}).get("docx", "")
+    manual_docx = tk.StringVar(value=saved_manual if isinstance(saved_manual, str) else "")
+    manual_docx_busy = False
+    preview_loading = False
+    preview_generation = 0
+    preview_session = None
+    preview_page = 1
+    preview_total = 0
+    preview_draw_job = None
+    preview_photo = None
+
+    toolbar = ttk.Frame(left)
+    toolbar.pack(side="top", fill="x", pady=(0, 8))
+    selected_name = tk.StringVar(value="尚未選擇 Word 檔案")
+    page_label = tk.StringVar(value="0/0 頁")
+    ttk.Label(left, textvariable=selected_name, anchor="center",
+              wraplength=490).pack(fill="x", pady=(4, 5))
+    ttk.Label(left, textvariable=page_label, anchor="center").pack(pady=(0, 4))
+    page_scale = ttk.Scale(left, from_=1, to=1, orient="horizontal")
+    page_scale.pack(fill="x", padx=15, pady=(0, 10))
+    page_scale.state(["disabled"])
+    preview_canvas = tk.Canvas(left, width=490, height=610, highlightthickness=0)
+    preview_canvas.pack(fill="both", expand=True)
+    preview_message = "選擇 DOCX 後顯示完整頁面"
+    preview_canvas.bind("<Configure>", lambda _: draw_preview_placeholder()
+                        if preview_photo is None else show_preview_photo())
+    preview_status = tk.StringVar(value="")
+    ttk.Label(left, textvariable=preview_status, anchor="center",
+              wraplength=490).pack(fill="x", pady=(6, 0))
+
+    def draw_preview_placeholder():
+        preview_canvas.delete("all")
+        preview_canvas.create_text(max(preview_canvas.winfo_width()//2, 200),
+                                   max(preview_canvas.winfo_height()//2, 240),
+                                   text=preview_message, fill="#9ca3af",
+                                   font=("Segoe UI", 11))
+    def show_preview_photo():
+        preview_canvas.delete("all")
+        if preview_photo is not None:
+            preview_canvas.create_image(
+                preview_canvas.winfo_width()//2, preview_canvas.winfo_height()//2,
+                image=preview_photo, anchor="center")
+        else:
+            draw_preview_placeholder()
+
+    def load_page_preview():
+        nonlocal preview_draw_job
+        preview_draw_job = None
+        if preview_session is None or preview_loading:
+            return
+        selected_page = preview_page
+        generation = preview_generation
+        current = preview_session
+        try:
+            page_image = render_document_page(current, selected_page, scale=1.45)
+            target = (max(1, preview_canvas.winfo_width()-18),
+                      max(1, preview_canvas.winfo_height()-18))
+            page_image.thumbnail(target, Image.Resampling.LANCZOS)
+            events.put(("page_image", (generation, selected_page, page_image)))
+        except Exception as exc:
+            events.put(("preview_error", (generation, str(exc))))
+
+    def schedule_page_preview():
+        nonlocal preview_draw_job
+        if preview_draw_job is not None:
+            root.after_cancel(preview_draw_job)
+        preview_draw_job = root.after(110, load_page_preview)
+
+    def page_moved(value):
+        nonlocal preview_page
+        if not preview_total or preview_loading:
+            return
+        requested = max(1, min(preview_total, round(float(value))))
+        if requested == preview_page:
+            return
+        preview_page = requested
+        page_label.set("%d/%d 頁" % (preview_page, preview_total))
+        schedule_page_preview()
+    page_scale.configure(command=page_moved)
+
+    def select_manual_docx(path=None):
+        nonlocal preview_generation, preview_session, preview_loading
+        nonlocal preview_total, preview_page, preview_photo, preview_message
+        path = path or filedialog.askopenfilename(
+            parent=root, title="選擇 Word DOCX",
+            filetypes=[("Word DOCX", "*.docx")])
+        if not path:
+            return
+        source = Path(path).expanduser().resolve()
+        if source.suffix.casefold() != ".docx" or not source.is_file():
+            messagebox.showerror("檔案錯誤", "請選擇存在的 DOCX", parent=root)
+            return
+        manual_docx.set(str(source))
+        try:
+            write_json(MANUAL_SELECTION, {"docx": str(source)})
+        except OSError as exc:
+            publish("記憶最近手動選檔失敗：" + str(exc))
+        preview_generation += 1
+        generation = preview_generation
+        preview_loading = True
+        preview_session = None
+        preview_total = 0
+        preview_page = 1
+        preview_photo = None
+        preview_message = "正在讀取 Word 頁面…"
+        page_label.set("0/0 頁")
+        selected_name.set(source.name)
+        preview_status.set("正在轉換 DOCX，建立頁面預覽…")
+        page_scale.state(["disabled"])
+        update_button.configure(state="disabled")
+        draw_preview_placeholder()
+        def prepare():
+            try:
+                folder = Path(preview_storage.name) / uuid.uuid4().hex
+                session = prepare_docx_preview(source, folder)
+                events.put(("preview_ready", (generation, session)))
+            except Exception as exc:
+                events.put(("preview_error", (generation, str(exc))))
+        threading.Thread(target=prepare, daemon=True).start()
+
+    choose_button = ttk.Button(toolbar, text="選擇檔案", command=select_manual_docx)
+    choose_button.pack(side="left", padx=(0, 5))
+    # manual_update_click is defined after page controls, but the button
+    # callback resolves it only on user interaction.
+    update_button = ttk.Button(toolbar, text="立即更新",
+                               command=lambda: manual_update_click())
+    update_button.pack(side="left", padx=(0, 5))
+    mode_button = ttk.Button(toolbar, text="模式:精簡",
+                             command=lambda: set_mode(not mode_advanced))
+    mode_button.pack(side="left")
+    update_button.configure(state="disabled")
+
+    # Advanced settings reuse the existing controls; no copy of their state.
     for index,(name,label) in enumerate([
         ("watch_dir","監控資料夾"), ("size","mooInk 尺寸"),
         ("interval_sec","檢查秒數"),
@@ -658,7 +811,8 @@ def main():
         ttk.Label(frame,text=label).grid(row=index,column=0,sticky="w",pady=5)
         fields[name] = tk.StringVar(value=str(getattr(settings,name)))
         if name=="size":
-            widget=ttk.Combobox(frame,textvariable=fields[name],values=("10.3","13.3"),state="readonly",width=44)
+            widget=ttk.Combobox(frame,textvariable=fields[name],
+                                values=("10.3","13.3"),state="readonly",width=44)
         else:
             widget=ttk.Entry(frame,textvariable=fields[name],width=47)
         widget.grid(row=index,column=1,sticky="ew",padx=8)
@@ -675,39 +829,29 @@ def main():
             filetypes=[("Word DOCX", "*.docx")]) or custom_docx.get())).pack(side="left")
     ttk.Button(docx_actions, text="清除",command=lambda: custom_docx.set("")).pack(side="left")
 
-    # One-shot manual DOCX is independent of the automatic monitored source.
-    saved_manual = read_json(MANUAL_SELECTION, {}).get("docx", "")
-    manual_docx = tk.StringVar(value=saved_manual if isinstance(saved_manual, str) else "")
-    manual_docx_busy = False
-    ttk.Label(frame,text="手動選檔 DOCX").grid(row=5,column=0,sticky="w",pady=5)
-    ttk.Entry(frame,textvariable=manual_docx,width=47).grid(
-        row=5,column=1,sticky="ew",padx=8)
-    manual_actions = ttk.Frame(frame)
-    manual_actions.grid(row=5,column=2,sticky="w")
-    ttk.Button(manual_actions, text="選檔", command=lambda: manual_docx.set(
-        filedialog.askopenfilename(title="選擇這次手動傳送的 Word DOCX",
-            filetypes=[("Word DOCX", "*.docx")]) or manual_docx.get())).pack(side="left")
+    resident_setting = tk.BooleanVar(value=settings.stay_resident)
+    ttk.Checkbutton(frame, text="常駐模式（關閉視窗仍在系統匣運作；預設關閉）",
+                    variable=resident_setting).grid(
+        row=5,column=0,columnspan=3,sticky="w",pady=5)
     def manual_update_click():
         nonlocal manual_docx_busy
-        if manual_docx_busy:
+        if manual_docx_busy or preview_loading:
             return
-        selected = Path(manual_docx.get().strip()).expanduser().resolve()
-        if selected.suffix.casefold() != ".docx" or not selected.is_file():
-            messagebox.showerror("選檔錯誤","請先選擇存在的 DOCX 檔案",parent=root)
+        if preview_session is None or not preview_session.source_unchanged():
+            messagebox.showerror("頁面預覽失效",
+                                 "Word 已修改或尚未載入預覽，請重新選擇 DOCX。",
+                                 parent=root)
             return
-        try:
-            write_json(MANUAL_SELECTION, {"docx": str(selected)})
-        except OSError as exc:
-            messagebox.showerror("儲存選檔失敗",str(exc),parent=root)
-            return
+        selected = preview_session.source
+        selected_page = preview_page
         manual_docx_busy = True
-        manual_update_button.configure(state="disabled")
-        publish("手動 DOCX 更新已排入工作：" + selected.name)
-        manual_requests.put(selected)
+        update_button.configure(state="disabled")
+        preview_status.set("正在傳送第 %d/%d 頁…" % (selected_page, preview_total))
+        publish("手動更新：" + selected.name + " 第 %d/%d 頁" %
+                (selected_page, preview_total))
+        manual_requests.put((selected, preview_session, selected_page))
         trigger.set()
-    manual_update_button = ttk.Button(
-        manual_actions, text="立即更新", command=manual_update_click)
-    manual_update_button.pack(side="left",padx=(5,0))
+
     enable_usb = tk.BooleanVar(value=settings.enable_usb)
     ttk.Checkbutton(frame,text="啟用 USB 自動更新 sleep 圖片",
                     variable=enable_usb).grid(row=6,column=0,columnspan=3,sticky="w",pady=5)
@@ -733,6 +877,7 @@ def main():
             values["enable_usb"] = bool(enable_usb.get())
             values["update_on_connect"] = bool(update_on_connect.get())
             values["update_on_file_change"] = bool(update_on_file_change.get())
+            values["stay_resident"] = bool(resident_setting.get())
             new=Settings(**values).validate()
             if new.enable_usb and (not settings.enable_usb or new.size != settings.size):
                 if not messagebox.askyesno("啟用 USB 更新",
@@ -748,7 +893,7 @@ def main():
                     new.enable_usb and new.custom_docx != settings.custom_docx)
                 settings=new
             trigger.set()
-            root.withdraw()
+            preview_status.set("進階設定已儲存")
         except (ValueError,OSError) as exc:
             messagebox.showerror("設定錯誤", str(exc), parent=root)
     usb_box = ttk.LabelFrame(frame, text="USB MTP / Pico 測試", padding=8)
@@ -899,7 +1044,7 @@ def main():
             nonlocal manual_docx_busy
             if retry_manual is not None:
                 manual_docx_busy = False
-                manual_update_button.configure(state="normal")
+                update_button.configure(state="normal" if preview_session else "disabled")
             dialog.destroy()
         dialog.protocol("WM_DELETE_WINDOW", close_pairing)
         def assign():
@@ -927,7 +1072,58 @@ def main():
         ttk.Button(dialog,text="儲存此裝置尺寸並繼續" if retry_manual is not None
                    else "儲存此裝置尺寸",command=assign).pack(pady=14)
 
-    root.protocol("WM_DELETE_WINDOW",root.withdraw)
+    def set_mode(advanced):
+        """Advanced: right settings pane + dark colors; simple: three controls
+        and full-page preview on a light canvas. Never save mode to disk."""
+        nonlocal mode_advanced
+        mode_advanced = bool(advanced)
+        background = "#171b24" if advanced else "#f6f7fa"
+        surface = "#242a35" if advanced else "#ffffff"
+        foreground = "#eef2f6" if advanced else "#1d2939"
+        edge = "#444d5d" if advanced else "#ccd4df"
+        style.configure(".", background=background, foreground=foreground,
+                        fieldbackground=surface)
+        for widget in ("TFrame","TLabel","TCheckbutton","TLabelframe"):
+            style.configure(widget, background=background, foreground=foreground)
+        style.configure("TLabelframe.Label", background=background,
+                        foreground=foreground)
+        style.configure("TButton", background=surface, foreground=foreground,
+                        padding=(9, 6), bordercolor=edge)
+        style.map("TButton",
+                  background=[("active","#3b4558" if advanced else "#e4e9f1")],
+                  foreground=[("active",foreground),("disabled","#a1a8b2")])
+        for widget in ("TEntry", "TCombobox", "TSpinbox"):
+            style.configure(widget, fieldbackground=surface, foreground=foreground,
+                            background=surface)
+            style.map(widget, fieldbackground=[("readonly",surface)],
+                      foreground=[("readonly",foreground)])
+        style.configure("TScale", background=background, troughcolor=edge)
+        style.configure("Treeview", background=surface, fieldbackground=surface,
+                        foreground=foreground)
+        style.configure("Treeview.Heading", background=surface, foreground=foreground)
+        root.configure(background=background)
+        preview_canvas.configure(background="#212833" if advanced else "#f0f2f6")
+        if advanced:
+            frame.pack(side="right",fill="both",expand=True)
+            mode_button.configure(text="模式:進階")
+            width = min(root.winfo_screenwidth()-80, 1300)
+            height = min(root.winfo_screenheight()-110, 850)
+        else:
+            frame.pack_forget()
+            mode_button.configure(text="模式:精簡")
+            width = min(root.winfo_screenwidth()-80, 530)
+            height = min(root.winfo_screenheight()-110, 790)
+        root.geometry("%dx%d" % (max(480,width), max(620,height)))
+        show_preview_photo()
+
+    def close_or_reside():
+        if settings.stay_resident:
+            root.withdraw()
+        else:
+            events.put(("exit", None))
+
+    root.protocol("WM_DELETE_WINDOW", close_or_reside)
+
     def tray_action(action):
         return lambda *_: events.put((action,None))
     tray=pystray.Icon("mooink_display",icon,"mooInk Display Watcher",pystray.Menu(
@@ -938,7 +1134,9 @@ def main():
         pystray.MenuItem("結束",tray_action("exit"))))
     thread=threading.Thread(target=worker,daemon=True)
     def drain():
-        nonlocal force_pending, manual_busy, manual_docx_busy
+        nonlocal force_pending, manual_busy, preview_loading
+        nonlocal preview_generation, preview_session, preview_total, preview_page, preview_photo
+        nonlocal preview_message, preview_draw_job, manual_docx_busy
         while True:
             try:
                 action,value=events.get_nowait()
@@ -946,6 +1144,40 @@ def main():
                 break
             if action=="status":
                 status_text.set(value)
+            elif action=="preview_ready":
+                generation, session = value
+                if generation != preview_generation:
+                    continue
+                preview_loading = False
+                preview_session = session
+                preview_total = session.page_count
+                preview_page = 1
+                page_label.set("1/%d 頁" % preview_total)
+                page_scale.configure(from_=1, to=preview_total)
+                page_scale.set(1)
+                page_scale.state(["!disabled"] if preview_total > 1 else ["disabled"])
+                update_button.configure(
+                    state="disabled" if manual_docx_busy else "normal")
+                preview_status.set("共 %d 頁；拖曳卷軸即可預覽完整頁面" % preview_total)
+                schedule_page_preview()
+            elif action=="page_image":
+                generation, selected_page, image = value
+                if generation != preview_generation or selected_page != preview_page:
+                    continue
+                preview_photo = ImageTk.PhotoImage(image, master=root)
+                preview_message = ""
+                show_preview_photo()
+            elif action=="preview_error":
+                generation, message = value
+                if generation != preview_generation:
+                    continue
+                preview_loading = False
+                preview_session = None
+                preview_photo = None
+                preview_message = "無法預覽此 Word：" + message
+                preview_status.set(preview_message)
+                update_button.configure(state="disabled")
+                draw_preview_placeholder()
             elif action=="connection":
                 connection_text.set(value)
             elif action=="inventory":
@@ -968,23 +1200,25 @@ def main():
                 pass
             elif action=="manual_docx_done":
                 manual_docx_busy = False
-                manual_update_button.configure(state="normal")
+                update_button.configure(state="normal" if preview_session else "disabled")
                 message, failed = value
                 status_text.set(message)
+                preview_status.set(message)
                 if failed:
                     messagebox.showwarning("手動 DOCX 更新", message, parent=root)
             elif action=="manual_reader_help":
-                selected, reason, readers, detail = value
+                request, reason, readers, detail = value
                 status_text.set(detail)
+                preview_status.set(detail)
                 if reason == "unpaired":
                     # If the model knows the device but not its size, guide the
                     # first-time pairing and automatically retry the pending DOCX.
                     root.deiconify()
                     root.lift()
-                    open_device_pairing(readers, retry_manual=selected)
+                    open_device_pairing(readers, retry_manual=request)
                 else:
                     manual_docx_busy = False
-                    manual_update_button.configure(state="normal")
+                    update_button.configure(state="normal" if preview_session else "disabled")
                     messagebox.showwarning("Mooink USB 裝置狀態", detail, parent=root)
             elif action=="manual_result":
                 operation, result, error = value
@@ -1018,6 +1252,7 @@ def main():
                     listing.configure(state="disabled")
             elif action=="settings":
                 root.deiconify()
+                set_mode(True)
                 root.lift()
             elif action=="check":
                 with settings_lock:
@@ -1038,10 +1273,15 @@ def main():
     thread.start()
     threading.Thread(target=watch_device_events, args=(stop, notify_device, logger.info),
                      daemon=True).start()
-    if not CONFIG.exists() or not settings.enable_usb:
-        root.deiconify()
+    set_mode(False)
+    root.deiconify()
+    if saved_manual and Path(saved_manual).is_file():
+        root.after(160, lambda: select_manual_docx(saved_manual))
     root.after(150,drain)
     root.mainloop()
+    stop.set()
+    trigger.set()
+    preview_storage.cleanup()
 
 if __name__=="__main__":
     import argparse

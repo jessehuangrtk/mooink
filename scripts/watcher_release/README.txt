@@ -140,3 +140,29 @@ TROUBLESHOOTING MANUAL DOCX: NO CONNECTED/PAIRED MOOINK
 - The first pairing is intentional: the WPD ID cannot reliably encode
   physical screen size. An unpaired device must not receive any uploads.
 - No changes to the automatic monitored Word source or PNG files are made.
+
+MAIN WINDOW / PAGE SELECTOR / ADVANCED MODE
+- On EVERY startup, the window begins in Light/Simple mode. The main pane
+  shows exactly three action buttons: Select File, Update Now, Mode:Simple;
+  below them are XX/YY page number, a page slider, and a full-page preview.
+- Word DOCX can contain multiple pages. Selecting a DOCX exports it once to a
+  temporary PDF and loads its full page count (YY), not just the first page.
+  The slider selects page XX and previews that entire page, including margins.
+  "Update Now" sends only the selected page XX to every paired/ready Mooink;
+  only the uploaded page is whitespace-cropped and fitted to each panel size.
+  A changed DOCX invalidates the old preview, preventing stale-page updates.
+  Manual selection and the automatic watched DOCX remain fully separate.
+- Clicking Mode:Simple switches to Mode:Advanced and reveals all previous
+  settings, pairing controls and transfer history in a panel ON THE RIGHT.
+  The entire app changes to dark colors in advanced mode. Click again to
+  collapse the right pane and return to Simple/Light mode.
+  The mode is NEVER persisted: every program start begins Simple/Light.
+- Advanced panel adds a "Stay resident" checkbox. Default OFF: closing the
+  window quits the watcher rather than leaving a background tray process.
+  When ON and SAVED, closing the window hides it in the system tray and
+  monitoring continues. Use the tray menu to reopen the window or exit.
+  This setting is saved in mooink_display_watcher.json as stay_resident.
+- Page conversion needs Microsoft Word (Windows COM) or LibreOffice; the PDF
+  preview renderer is bundled via PyMuPDF. The preview PDF is temporary and
+  is removed when the app exits. A multi-page selection never changes or
+  overwrites the source DOCX.

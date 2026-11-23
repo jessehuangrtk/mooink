@@ -459,3 +459,14 @@ class WatcherTests(unittest.TestCase):
                 self.assertGreater(b2 - t2, (bottom - top) * 2)
                 self.assertGreater(l2, 0)
                 self.assertGreater(t2, 0)
+
+
+    def test_stay_resident_default_off_and_optional_setting(self):
+        from dataclasses import asdict
+        with tempfile.TemporaryDirectory() as tmp:
+            default = Settings(watch_dir=tmp)
+            self.assertFalse(default.stay_resident)
+            self.assertFalse(asdict(default)["stay_resident"])
+            on = Settings(watch_dir=tmp, stay_resident=True)
+            self.assertTrue(on.validate().stay_resident)
+
