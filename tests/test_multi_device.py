@@ -87,3 +87,26 @@ class DeviceProfilesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_multi_device_forwards_independent_trigger_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = DeviceRegistry(Path(tmp)/"profiles.json")
+            ids = ("a"*64, "b"*64)
+            reg.assign(ids[0], "10.3", "A")
+            reg.assign(ids[1], "13.3", "B")
+            seen = []
+            rows = [{"id": rid, "name":rid[:4], "ready":True, "pnp":rid} for rid in ids]
+            class Fake:
+                def __init__(self, rid): self.rid=rid
+                def check(self, settings, **kwargs):
+                    seen.append((self.rid, settings.size,
+                                 settings.update_on_connect, settings.update_on_file_change))
+                    return "ok"
+            mgr = MultiDeviceController(reg, lambda rid: Fake(rid),
+                                        lambda: rows, lambda a,b:False)
+            cfg = Settings(watch_dir=tmp, enable_usb=True,
+                           update_on_connect=False, update_on_file_change=True)
+            mgr.check(cfg)
+            self.assertEqual(seen, [(ids[0], "10.3",False,True),
+                                    (ids[1], "13.3",False,True)])

@@ -66,3 +66,24 @@ No identification from physical screen size is attempted; an unpaired reader
 requires an explicit size selection, which avoids accidentally sending a
 13.3-inch PNG to a 10.3-inch reader. Multiple same-model readers are supported.
 Automatic Pico Space is disabled in multi-device mode; USB MTP still works.
+
+AUTOMATIC UPDATE TRIGGERS (both ON by default; select one or both):
+- Hot-plug update: synchronize each paired reader when it first becomes ready
+  or is unplugged and reconnected. A Word edit while still plugged in does
+  not trigger a transfer if this is the only enabled mode.
+- Polling file update: check the Word document every interval_sec seconds and
+  synchronize only when its contents or modification time changed since
+  that reader's last verified delivery. Connecting/reconnecting a previously
+  synchronized reader alone never forces an update in polling-only mode.
+  The first scheduled poll may deliver a file that has never been verified for
+  that reader, and unsent edits made while disconnected are sent on the next
+  scheduled check after reconnection.
+- With both enabled, either event can update. At least one trigger must be
+  enabled when USB auto update is enabled. Manual 'update now' overrides both.
+- When polling is disabled, no automatic Word-to-PNG conversion is done just
+  because the interval timer fires. USB is still discovered once per second.
+- The settings are stored in %LOCALAPPDATA%\mooink\mooink_display_watcher.json
+  as update_on_connect and update_on_file_change. Old installations default
+  both to ON without overwriting existing settings.
+- A success timestamp is recorded only after MTP readback verification. Pico
+  is not required. Multiple readers retain distinct last-delivered versions.

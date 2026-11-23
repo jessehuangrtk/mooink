@@ -109,7 +109,7 @@ class WatcherTests(unittest.TestCase):
             p=Processor(Path(tmp)/"state.json",render,upload,wake,probe=lambda: None)
             self.assertIn("已回讀驗證",p.check(s))
             self.assertIn("無更新",p.check(s))
-            self.assertEqual(actions,["upload","wake","upload"])
+            self.assertEqual(actions,["upload","wake"])
             p.check(s,force=True)
             self.assertEqual(actions[-2:],["upload","wake"])
 
@@ -237,3 +237,132 @@ class WatcherTests(unittest.TestCase):
             self.assertEqual(len(delivered), 2)
             self.assertEqual(delivered[-1]["word_mtime"], source.stat().st_mtime)
             p.wake.assert_not_called()
+
+
+    def test_trigger_configuration_defaults_and_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            default = Settings(watch_dir=tmp, enable_usb=True).validate()
+            self.assertTrue(default.update_on_connect)
+            self.assertTrue(default.update_on_file_change)
+            for plug, poll in ((True, False), (False, True), (True, True)):
+                Settings(watch_dir=tmp, enable_usb=True,
+                         update_on_connect=plug,
+                         update_on_file_change=poll).validate()
+            with self.assertRaises(ValueError):
+                Settings(watch_dir=tmp, enable_usb=True,
+                         update_on_connect=False,
+                         update_on_file_change=False).validate()
+
+    def test_hotplug_only_ignores_word_polling(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "mooink_display_10.docx"
+            src.write_bytes(b"initial")
+            online = False
+            def probe():
+                if not online:
+                    raise OSError("offline")
+                return "device-a"
+            render = Mock(side_effect=lambda source, output, size: output.write_bytes(b"PNG"))
+            upload = Mock(return_value={"changed": False})
+            success = []
+            settings = Settings(watch_dir=tmp, enable_usb=True, pico_port="",
+                                update_on_connect=True, update_on_file_change=False)
+            p = Processor(Path(tmp)/"state.json", render, upload, Mock(), probe)
+            # Not even an initial Word check until a USB arrival.
+            self.assertIsNone(p.check(settings, scheduled=True, on_success=success.append))
+            render.assert_not_called()
+            online = True
+            p.check(settings, scheduled=False, on_success=success.append)
+            self.assertEqual((render.call_count, upload.call_count), (1, 1))
+            src.write_bytes(b"edited while still attached")
+            self.assertIsNone(p.check(settings, scheduled=True, on_success=success.append))
+            self.assertEqual((render.call_count, upload.call_count), (1, 1))
+            online = False
+            p.check(settings, scheduled=False)
+            online = True
+            p.check(settings, scheduled=False, on_success=success.append)
+            self.assertEqual((render.call_count, upload.call_count), (2, 2))
+            self.assertEqual(len(success), 2)
+
+    def test_file_poll_only_never_uploads_on_reconnect_without_change(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "mooink_display_10.docx"
+            src.write_bytes(b"initial")
+            online = False
+            def probe():
+                if not online:
+                    raise OSError("offline")
+                return "reader"
+            render = Mock(side_effect=lambda source, output, size: output.write_bytes(b"PNG"))
+            upload = Mock(return_value={"changed": False})
+            successes = []
+            settings = Settings(watch_dir=tmp, enable_usb=True, pico_port="",
+                                update_on_connect=False, update_on_file_change=True)
+            state = Path(tmp)/"state.json"
+            p = Processor(state, render, upload, Mock(), probe)
+            p.check(settings, scheduled=True)
+            self.assertEqual(render.call_count, 1)
+            online = True
+            self.assertIsNone(p.check(settings, scheduled=False))
+            upload.assert_not_called()  # insertion alone must not transmit
+            p.check(settings, scheduled=True, on_success=successes.append)
+            self.assertEqual(upload.call_count, 1)
+            p.check(settings, scheduled=True, on_success=successes.append)
+            self.assertEqual(upload.call_count, 1)
+            online = False
+            p.check(settings, scheduled=False)
+            online = True
+            self.assertIsNone(p.check(settings, scheduled=False))
+            p.check(settings, scheduled=True, on_success=successes.append)
+            self.assertEqual(upload.call_count, 1)
+            # Restart still remembers the last verified Word version.
+            restarted = Processor(state, render, upload, Mock(), probe)
+            restarted.check(settings, scheduled=True, on_success=successes.append)
+            self.assertEqual(upload.call_count, 1)
+            src.write_bytes(b"edited")
+            restarted.check(settings, scheduled=True, on_success=successes.append)
+            self.assertEqual(upload.call_count, 2)
+            self.assertEqual(len(successes), 2)
+
+    def test_both_triggers_independent_and_failed_upload_retries(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp)/"mooink_display_10.docx"
+            src.write_bytes(b"first")
+            online = True
+            def probe():
+                if not online:
+                    raise OSError("offline")
+                return "reader"
+            upload = Mock(side_effect=[{"changed": True}, OSError("link gone"),
+                                       {"changed": False}, {"changed": False}])
+            render = Mock(side_effect=lambda source, output, size: output.write_bytes(b"PNG"))
+            p = Processor(Path(tmp)/"state.json", render, upload, Mock(), probe)
+            settings = Settings(watch_dir=tmp, enable_usb=True, pico_port="",
+                                update_on_connect=True, update_on_file_change=True)
+            successes = []
+            p.check(settings, scheduled=False, on_success=successes.append)
+            src.write_bytes(b"updated")
+            with self.assertRaises(OSError):
+                p.check(settings, scheduled=True, on_success=successes.append)
+            self.assertEqual(len(successes), 1)  # no false confirmation
+            # Retry on recovery (without waiting for file interval).
+            p.check(settings, scheduled=False, on_success=successes.append)
+            self.assertEqual(len(successes), 2)
+            online = False
+            p.check(settings, scheduled=False)
+            online = True
+            p.check(settings, scheduled=False, on_success=successes.append)
+            self.assertEqual(len(successes), 3)
+            self.assertEqual(upload.call_count, 4)
+
+    def test_same_vid_different_serial_does_not_trigger_other_reader(self):
+        from mooink_display_watcher import reader_event_matches
+        arrival = r"\\?\USB#VID_1F85&PID_4E16#SERIAL_A#{guid}"
+        reader_a = r"USB\VID_1F85&PID_4E16\SERIAL_A"
+        reader_b = r"USB\VID_1F85&PID_4E16\SERIAL_B"
+        self.assertTrue(reader_event_matches(arrival, reader_a))
+        self.assertFalse(reader_event_matches(arrival, reader_b))
+        self.assertFalse(reader_event_matches(arrival, ""))

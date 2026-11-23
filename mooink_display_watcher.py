@@ -74,8 +74,12 @@ class Settings:
     interval_sec: int = 60
     pico_port: str = "COM6"  # blank disables Pico
     enable_usb: bool = False  # explicit opt-in for USB image replacement
+    update_on_connect: bool = True  # initial USB connection and reconnection
+    update_on_file_change: bool = True  # scheduled DOCX checks
 
     def validate(self):
+        if self.enable_usb and not (self.update_on_connect or self.update_on_file_change):
+            raise ValueError("啟用 USB 自動更新時，至少選擇「插拔更新」或「Word 定時更新」一項")
         if self.size not in RESOLUTIONS:
             raise ValueError("尺寸必須為 10.3 或 13.3")
         if not 5 <= self.interval_sec <= 86400:
@@ -212,17 +216,18 @@ def usb_readers():
 
 
 def reader_event_matches(path, identity):
-    """Match a WPD interface notification to the known reader, not Pico."""
+    """Match a WPD notification to the SAME reader, not merely its VID/PID."""
     path = str(path or "").casefold()
     identity = str(identity or "").casefold()
-    if not path:
+    if not path or not identity:
         return False
-    if "vid_1f85" in path and "pid_4e16" in path:
-        return True
-    # WPD interface class suffixes can differ between enumeration and events.
-    def prefix(value):
-        return value.split("#{", 1)[0]
-    return bool(identity and prefix(path) == prefix(identity))
+    def canonical(value):
+        # Notification: \\?\USB#VID_...#SERIAL#{interface-GUID}
+        # WPD/PnP ID:   USB\VID_...\SERIAL
+        value = value.split("#{", 1)[0]
+        value = value.removeprefix("\\\\?\\")
+        return value.replace("#", "\\")
+    return canonical(path) == canonical(identity)
 
 
 def watch_device_events(stop, notify, log):
@@ -326,42 +331,52 @@ class Processor:
             self.usb_ready = False
             self.reconnect_pending = False
             self.reader_identity = None
-        usb_error = None
         was_ready = self.usb_ready
+        usb_error = None
         if settings.enable_usb:
-            if any(reader_event_matches(path, self.reader_identity) for path in device_events):
+            if settings.update_on_connect and any(
+                    reader_event_matches(path, self.reader_identity)
+                    for path in device_events):
                 self.reconnect_pending = True
             try:
                 identity = self.probe()
-                if self.reader_identity is not None and identity != self.reader_identity:
+                if (settings.update_on_connect and self.reader_identity is not None
+                        and identity != self.reader_identity):
                     self.reconnect_pending = True
                 self.reader_identity = identity
                 self.usb_ready = True
             except Exception as exc:
                 self.usb_ready = False
                 usb_error = str(exc)
-            if self.usb_ready and not was_ready:
+            if self.usb_ready and not was_ready and settings.update_on_connect:
                 self.reconnect_pending = True
-                log("mooInk USB 已連線，強制重新轉圖及更新")
+                log("mooInk USB 已連線，依「插拔更新」設定同步")
             on_connection("mooInk USB：已連線" if self.usb_ready else "mooInk USB：等待連線")
         else:
             on_connection("mooInk USB：自動更新未啟用")
-        # Keep the reconnect request until a verified transfer completes.
-        force = force or (self.usb_ready and self.reconnect_pending)
-        if not scheduled and not force:
+
+        # Manual updates always override both automatic trigger switches.
+        hotplug_due = (settings.enable_usb and settings.update_on_connect
+                       and self.usb_ready and self.reconnect_pending)
+        force_render = force or hotplug_due
+        file_poll = scheduled and (not settings.enable_usb or settings.update_on_file_change)
+        if not force_render and not file_poll:
             if was_ready and not self.usb_ready:
                 return "mooInk USB 已離線，等待重新連線"
             return None
+
         src, dst = settings.paths()
         if not src.is_file():
             return "等待 " + src.name
         source_stat = src.stat()
         digest = sha256(src)
         record = self.rendered.get(key)
-        current = (isinstance(record, dict) and record.get("source") == digest
+        if not isinstance(record, dict):
+            record = {}
+        current = (record.get("source") == digest
                    and record.get("word_mtime_ns") == source_stat.st_mtime_ns
                    and dst.is_file() and record.get("png") == sha256(dst))
-        rendered_now = force or not current
+        rendered_now = force_render or not current
         if rendered_now:
             with tempfile.TemporaryDirectory(prefix="mooink_source_") as directory:
                 snapshot = Path(directory) / src.name
@@ -373,41 +388,66 @@ class Processor:
                 self.render(snapshot, dst, settings.size)
             if sha256(src) != digest or src.stat().st_mtime_ns != source_stat.st_mtime_ns:
                 return "Word 已再更新，稍後重試最新版本"
-            record = {"source": digest, "png": sha256(dst),
+            record = {**record, "source": digest, "png": sha256(dst),
                       "word_mtime": source_stat.st_mtime,
                       "word_mtime_ns": source_stat.st_mtime_ns}
             self.rendered[key] = record
             write_json(self.state_path, self.rendered)
             log("本機 PNG 已輸出：" + dst.name)
+
         if not settings.enable_usb:
             return ("無更新：" + src.name if current and not force else
                     dst.name + " 已輸出；USB 自動傳送尚未啟用")
+
+        # Delivery is tracked per device, separate from local render caching.
+        # Connecting with hotplug disabled MUST NOT resend unchanged content.
+        pending_document = (file_poll and
+                            (record.get("delivered_source") != digest
+                             or record.get("delivered_word_mtime_ns") != source_stat.st_mtime_ns
+                             or record.get("delivered_png") != record.get("png")))
+        upload_due = force_render or pending_document
+        if not upload_due:
+            if was_ready and not self.usb_ready:
+                return "mooInk USB 已離線，等待重新連線"
+            return "無更新：" + src.name
         if not self.usb_ready:
-            return "等待 mooInk USB 連線；本機 PNG 已就緒：" + (usb_error or "")
+            return "等待 mooInk USB 連線；下次允許的觸發事件將重試：" + (usb_error or "")
+
         # The immutable transfer snapshot is also the source of the UI preview.
         with tempfile.TemporaryDirectory(prefix="mooink_transfer_") as directory:
             snapshot = Path(directory) / dst.name
             shutil.copyfile(dst, snapshot)
-            if sha256(snapshot) != record["png"] or sha256(src) != digest:
+            if (sha256(snapshot) != record["png"] or sha256(src) != digest
+                    or src.stat().st_mtime_ns != source_stat.st_mtime_ns):
                 return "本機檔案已更新，暫不傳送；稍後重試"
             try:
                 result = self.upload(settings, snapshot, log)
             except Exception:
                 self.usb_ready = False
-                self.reconnect_pending = True
+                if settings.update_on_connect and hotplug_due:
+                    self.reconnect_pending = True
                 on_connection("mooInk USB：傳送失敗，等待重試")
                 raise
-            if result["changed"] or rendered_now:
-                on_success({"updated_at": time.time(), "word_mtime": record["word_mtime"],
-                            "word_name": src.name, "png_name": dst.name,
-                            "png_bytes": snapshot.read_bytes()})
+            if (sha256(src) != digest or src.stat().st_mtime_ns != source_stat.st_mtime_ns
+                    or sha256(dst) != record["png"]):
+                return "Word 已再更新，稍後重試最新版本"
+            delivery = {"updated_at": time.time(),
+                        "word_mtime": source_stat.st_mtime,
+                        "word_name": src.name, "png_name": dst.name,
+                        "png_bytes": snapshot.read_bytes()}
+
+        # Commit the verified delivery marker only after the WPD readback
+        # passed. A failed upload leaves the pending file change intact.
+        record.update({"delivered_source": digest,
+                       "delivered_word_mtime_ns": source_stat.st_mtime_ns,
+                       "delivered_png": record["png"]})
+        self.rendered[key] = record
+        write_json(self.state_path, self.rendered)
         self.reconnect_pending = False
-        if sha256(src) != digest or sha256(dst) != record["png"]:
-            return "檔案已更新，暫不喚醒；稍後重試"
-        if not result["changed"] and not rendered_now:
-            return "無更新：sleep/" + dst.name + " 已回讀驗證"
+        on_success(delivery)
         try:
-            wake_result = self.wake(settings.pico_port, log) if settings.pico_port else "未設定 Pico，略過 Space"
+            wake_result = (self.wake(settings.pico_port, log) if settings.pico_port
+                           else "未設定 Pico，略過 Space")
         except Exception as exc:
             wake_result = "Pico 不可用，略過 Space：" + str(exc)
         log(wake_result)
@@ -498,7 +538,8 @@ def main():
                         # Always keep the local Word->PNG feature running even
                         # while all USB readers are disconnected/unpaired.
                         local_result = processor.check(replace(current, enable_usb=False),
-                            force, publish, scheduled=scheduled)
+                            force, publish,
+                            scheduled=scheduled and current.update_on_file_change)
                         results = multiple.check(
                             current, force=force, scheduled=scheduled, device_events=paths,
                             log=publish,
@@ -508,7 +549,7 @@ def main():
                         result = results[-1] if results else (local_result or "裝置掃描完成（未配對或無裝置）")
                     else:
                         result = processor.check(current, force, publish,
-                            scheduled=scheduled)
+                            scheduled=scheduled and current.update_on_file_change)
             except Exception as exc:
                 result = "失敗，下次重試：" + str(exc)
             if result is not None and (result != previous or force):
@@ -535,15 +576,25 @@ def main():
     enable_usb = tk.BooleanVar(value=settings.enable_usb)
     ttk.Checkbutton(frame,text="啟用 USB 自動更新 sleep 圖片",
                     variable=enable_usb).grid(row=4,column=0,columnspan=3,sticky="w",pady=5)
-    ttk.Label(frame,text="依尺寸產生 mooink_display_10 / 13 的 PNG。\nUSB MTP 備份舊同名 PNG → 上傳 → SHA-256 回讀驗證 → Pico Space（選用）。\n可同時連接多台 mooInk，先以裝置 ID 配對尺寸。\n多裝置 USB 更新不會自動傳送 Pico Space。",wraplength=530).grid(row=6,column=0,columnspan=3,sticky="w",pady=8)
-    ttk.Label(frame,textvariable=connection_text).grid(row=5,column=0,columnspan=3,sticky="w")
-    ttk.Label(frame,textvariable=status_text,wraplength=550).grid(row=7,column=0,columnspan=3,sticky="w",pady=5)
+    update_on_connect = tk.BooleanVar(value=settings.update_on_connect)
+    update_on_file_change = tk.BooleanVar(value=settings.update_on_file_change)
+    modes = ttk.LabelFrame(frame, text="自動更新觸發條件（可擇一或兩個都勾）", padding=6)
+    modes.grid(row=5,column=0,columnspan=3,sticky="ew",pady=4)
+    ttk.Checkbutton(modes, text="插拔更新：USB 新連線／重新插入時立即同步",
+                    variable=update_on_connect).pack(anchor="w")
+    ttk.Checkbutton(modes, text="Polling file update：依設定秒數檢查 Word，變更後同步",
+                    variable=update_on_file_change).pack(anchor="w")
+    ttk.Label(frame,text="依尺寸產生 mooink_display_10 / 13 的 PNG。\nUSB MTP 備份舊同名 PNG → 上傳 → SHA-256 回讀驗證 → Pico Space（選用）。\n可同時連接多台 mooInk，先以裝置 ID 配對尺寸。\n多裝置 USB 更新不會自動傳送 Pico Space。",wraplength=530).grid(row=7,column=0,columnspan=3,sticky="w",pady=8)
+    ttk.Label(frame,textvariable=connection_text).grid(row=6,column=0,columnspan=3,sticky="w")
+    ttk.Label(frame,textvariable=status_text,wraplength=550).grid(row=8,column=0,columnspan=3,sticky="w",pady=5)
     def save():
         nonlocal settings, force_pending
         try:
             values={k:v.get().strip() for k,v in fields.items()}
             values["interval_sec"]=int(values["interval_sec"])
             values["enable_usb"] = bool(enable_usb.get())
+            values["update_on_connect"] = bool(update_on_connect.get())
+            values["update_on_file_change"] = bool(update_on_file_change.get())
             new=Settings(**values).validate()
             if new.enable_usb and (not settings.enable_usb or new.size != settings.size):
                 if not messagebox.askyesno("啟用 USB 更新",
@@ -552,14 +603,14 @@ def main():
                     return
             write_json(CONFIG,asdict(new))
             with settings_lock:
-                force_pending = force_pending or (new.enable_usb and new != settings)
+                # Changing trigger settings must not become a manual force upload.
                 settings=new
             trigger.set()
             root.withdraw()
         except (ValueError,OSError) as exc:
             messagebox.showerror("設定錯誤", str(exc), parent=root)
     usb_box = ttk.LabelFrame(frame, text="USB MTP / Pico 測試", padding=8)
-    usb_box.grid(row=8,column=0,columnspan=3,sticky="ew",pady=(4,8))
+    usb_box.grid(row=9,column=0,columnspan=3,sticky="ew",pady=(4,8))
     usb_status = tk.StringVar(value="請接上 mooInk USB 資料線")
     ttk.Label(usb_box,textvariable=usb_status,wraplength=540).pack(anchor="w")
     buttons = ttk.Frame(usb_box)
@@ -604,11 +655,11 @@ def main():
         button.pack(side="left",padx=3)
         action_buttons.append(button)
     save_button = ttk.Button(frame,text="儲存並開始監控",command=save)
-    save_button.grid(row=9,column=1,sticky="e",pady=10)
+    save_button.grid(row=10,column=1,sticky="e",pady=10)
     action_buttons.append(save_button)
 
     preview_box = ttk.LabelFrame(frame, text="最後一次 USB SHA-256 驗證成功的圖片", padding=8)
-    preview_box.grid(row=10,column=0,columnspan=3,sticky="ew",pady=5)
+    preview_box.grid(row=11,column=0,columnspan=3,sticky="ew",pady=5)
     ttk.Label(preview_box,textvariable=success_text,wraplength=550).pack(anchor="w")
     ttk.Label(preview_box,textvariable=word_text,wraplength=550).pack(anchor="w")
     tree_columns = ("size", "state", "updated", "wordtime")
