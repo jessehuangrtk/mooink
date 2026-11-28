@@ -112,7 +112,21 @@ def crop_white_border(image, *, threshold=245, required_fraction=0.985):
     # Preserve at least 10% of the photo; don't crop entirely near-white art.
     if (rect[2]-rect[0])*(rect[3]-rect[1]) < width*height*0.1:
         return image.copy()
-    return image.crop(rect)
+    candidate = image.crop(rect)
+    # The 640-pixel mask is approximate: upscaling its crop box can
+    # leave a 1-2 pixel white halo. Refine only a thin strip against the
+    # ORIGINAL pixels so that bright real content is not aggressively cut.
+    refined = candidate.convert("L").point(
+        [255 if value < threshold else 0 for value in range(256)]).getbbox()
+    if refined:
+        x0,y0,x1,y1=refined
+        slack_x=max(3,round(width*0.005))
+        slack_y=max(3,round(height*0.005))
+        if (x0<=slack_x and y0<=slack_y
+                and candidate.width-x1<=slack_x
+                and candidate.height-y1<=slack_y):
+            return candidate.crop(refined)
+    return candidate
 
 
 def optimize_photo_for_portrait(image, size):
