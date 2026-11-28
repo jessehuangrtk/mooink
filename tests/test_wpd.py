@@ -115,7 +115,7 @@ class QuietWpdTests(unittest.TestCase):
                     device_source=lambda: [dev], delete_after=True,
                 )
             self.assertIn("deleted+verified", result)
-            self.assertEqual(img.download_count, 1)
+            self.assertEqual(img.download_count, 2)  # backup + pre-delete hash recheck
             self.assertEqual(img.remove_count, 1)
             self.assertEqual(sleep.get_children(), [])
             self.assertTrue(dev.closed)
@@ -463,3 +463,102 @@ class ListReaderDiagnosticTests(unittest.TestCase):
         self.assertFalse(output[0]["ready"])
         self.assertIn("sleep", output[0]["error"])
         self.assertTrue(device.closed)
+
+
+class DevicePhotoManagementTests(unittest.TestCase):
+    def _two_readers(self):
+        from mook_mtp_wpd import _reader_id
+        a, a_folder, a_image = make_device(png_data(), device_name="mooInk")
+        b, b_folder, b_image = make_device(png_data(), device_name="mooInk")
+        a._p_id = r"USB\VID_1F85&PID_4E16\MANAGER_A"
+        b._p_id = r"USB\VID_1F85&PID_4E16\MANAGER_B"
+        return (a, a_folder, a_image, _reader_id(a)), (b, b_folder, b_image, _reader_id(b))
+
+    def test_list_each_connected_reader_photo_independently(self):
+        (a, folder_a, _, id_a), (b, folder_b, _, id_b) = self._two_readers()
+        folder_b.children[0].name = "second.jpg"
+        first = list_images(reader_id=id_a, device_source=lambda:[a,b])
+        second = list_images(reader_id=id_b, device_source=lambda:[a,b])
+        self.assertEqual([f["name"] for f in first],["001.png"])
+        self.assertEqual([f["name"] for f in second],["second.jpg"])
+
+    def test_backup_only_targeted_reader_never_deletes(self):
+        (a, fa, ia, id_a), (b, fb, ib, id_b) = self._two_readers()
+        with tempfile.TemporaryDirectory() as tmp:
+            result=backup_and_delete_one("001.png",tmp,reader_id=id_b,
+                              device_source=lambda:[a,b],delete_after=False)
+            self.assertIn("backup-only-wpd-verified",result)
+            self.assertEqual(ia.download_count,0)
+            self.assertEqual(ia.remove_count,0)
+            self.assertEqual(ib.download_count,1)
+            self.assertEqual(ib.remove_count,0)
+            self.assertEqual(len(fa.children),1)
+            self.assertEqual(len(fb.children),1)
+
+    def test_delete_targeted_reader_always_preserves_other_reader(self):
+        (a, fa, ia, id_a), (b, fb, ib, id_b) = self._two_readers()
+        with tempfile.TemporaryDirectory() as tmp:
+            result=backup_and_delete_one("001.png",tmp,reader_id=id_a,
+                             device_source=lambda:[a,b],delete_after=True)
+            self.assertIn("deleted+verified",result)
+            self.assertEqual(ia.remove_count,1)
+            self.assertEqual(ib.remove_count,0)
+            self.assertEqual(len(fa.children),0)
+            self.assertEqual(len(fb.children),1)
+            self.assertTrue((Path(tmp)/"001.png").exists())
+
+    def test_upload_targeted_reader_no_overwrite(self):
+        (a, fa, ia, id_a), (b, fb, ib, id_b) = self._two_readers()
+        with tempfile.TemporaryDirectory() as tmp:
+            photo=Path(tmp)/"new_picture.png"
+            photo.write_bytes(png_data())
+            result=upload_one(photo,reader_id=id_b,device_source=lambda:[a,b])
+            self.assertIn("uploaded+sha256-verified",result)
+            self.assertEqual(len(fa.children),1)
+            self.assertEqual(len(fb.children),2)
+            with self.assertRaises(FileExistsError):
+                upload_one(photo,reader_id=id_b,device_source=lambda:[a,b])
+            self.assertEqual(len(fb.children),2)
+
+    def test_invalid_reader_id_cannot_backup_delete_upload(self):
+        (a, fa, ia, id_a), (b, fb, ib, id_b) = self._two_readers()
+        with tempfile.TemporaryDirectory() as tmp:
+            photo=Path(tmp)/"new_picture.png"
+            photo.write_bytes(png_data())
+            for action in (
+                lambda:backup_and_delete_one("001.png",tmp,reader_id="f"*64,
+                                             device_source=lambda:[a,b]),
+                lambda:upload_one(photo,reader_id="f"*64,
+                                  device_source=lambda:[a,b]),
+            ):
+                with self.assertRaises(QuietMtpUnavailable):
+                    action()
+            self.assertEqual(ia.remove_count,0)
+            self.assertEqual(ib.remove_count,0)
+            self.assertEqual(len(fa.children),1)
+            self.assertEqual(len(fb.children),1)
+
+    def test_same_size_image_content_changed_during_backup_not_deleted(self):
+        class ChangingFile(FakeFile):
+            def __init__(self, *args,**kwargs):
+                super().__init__(*args,**kwargs)
+                self.old_payload=self.payload
+            def download_file(self,path):
+                super().download_file(path)
+                if self.download_count == 1:
+                    # Same length: avoid size-only deletion check.
+                    from PIL import Image
+                    alt=bytearray(self.old_payload)
+                    alt[-10] = (alt[-10]+1)%255
+                    self.payload=bytes(alt)
+        a, folder, old = make_device(png_data())
+        a._p_id = "WPD_WATCHER_TEST"
+        folder.children.clear()
+        image=ChangingFile(folder,"001.png",png_data())
+        folder.children.append(image)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError,"已改變"):
+                backup_and_delete_one("001.png",tmp,reader_id=None,
+                                      device_source=lambda:[a],delete_after=True)
+            self.assertEqual(image.remove_count,0)
+            self.assertEqual(len(folder.children),1)

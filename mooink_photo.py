@@ -68,90 +68,58 @@ def prepare_photo_preview(source, work_dir):
     return PhotoPreview(source, checksum, mtime, snapshot)
 
 
-def crop_white_border(image, *, threshold=245, required_fraction=0.985):
-    """Trim contiguous nearly-white outer rows/columns, not all white objects.
+def crop_white_border(image, *, threshold=250, required_fraction=None):
+    """Conservatively remove only near-white padding around the image.
 
-    A row/column is a margin only if >=98.5% of its pixels are near-white.
-    Edges become tight without blindly cropping a mostly-white photograph.
+    Determine the exact bounding rectangle of *every* nonwhite pixel from
+    the original pixels; never allow almost-empty rows to erase thin strokes,
+    captions or other meaningful edge details. No downsampling for crop
+    detection. Pure-white photographs are left unmodified.
     """
-    from PIL import Image
-    gray = image.convert("L")
-    # No numpy dependency: sample the outer rows and columns.
-    width, height = gray.size
-    if width < 2 or height < 2:
+    from PIL import ImageChops
+    rgb = image.convert("RGB")
+    # All three channels must be near-white before a pixel is removable.
+    red, green, blue = rgb.split()
+    red = red.point([255 if v < threshold else 0 for v in range(256)])
+    green = green.point([255 if v < threshold else 0 for v in range(256)])
+    blue = blue.point([255 if v < threshold else 0 for v in range(256)])
+    nonwhite = ImageChops.lighter(red, ImageChops.lighter(green, blue))
+    bounds = nonwhite.getbbox()
+    if bounds is None:
         return image.copy()
-    # Downsample only for detecting border thickness; crop original pixels.
-    sample = gray.copy()
-    sample.thumbnail((640, 640), Image.Resampling.BILINEAR)
-    sw, sh = sample.size
-    data = sample.load()
-    # Guard against nearly-white photos: only trim if there is a true
-    # nonwhite interior. Minimum 2% dark content avoids losing white scenes.
-    dark = sum(data[x,y] < threshold for y in range(sh) for x in range(sw))
-    if dark < sw * sh * 0.002:
-        return image.copy()
-    allowed_x = max(0, int((1-required_fraction)*sh))
-    allowed_y = max(0, int((1-required_fraction)*sw))
-    left, right, top, bottom = 0, sw, 0, sh
-    def col_is_white(x):
-        return sum(data[x,y] < threshold for y in range(sh)) <= allowed_x
-    def row_is_white(y):
-        return sum(data[x,y] < threshold for x in range(sw)) <= allowed_y
-    while left < right-1 and col_is_white(left):
-        left += 1
-    while right > left+1 and col_is_white(right-1):
-        right -= 1
-    while top < bottom-1 and row_is_white(top):
-        top += 1
-    while bottom > top+1 and row_is_white(bottom-1):
-        bottom -= 1
-    if left == 0 and right == sw and top == 0 and bottom == sh:
-        return image.copy()
-    rect = (round(left*width/sw), round(top*height/sh),
-            round(right*width/sw), round(bottom*height/sh))
-    # Preserve at least 10% of the photo; don't crop entirely near-white art.
-    if (rect[2]-rect[0])*(rect[3]-rect[1]) < width*height*0.1:
-        return image.copy()
-    candidate = image.crop(rect)
-    # The 640-pixel mask is approximate: upscaling its crop box can
-    # leave a 1-2 pixel white halo. Refine only a thin strip against the
-    # ORIGINAL pixels so that bright real content is not aggressively cut.
-    refined = candidate.convert("L").point(
-        [255 if value < threshold else 0 for value in range(256)]).getbbox()
-    if refined:
-        x0,y0,x1,y1=refined
-        slack_x=max(3,round(width*0.005))
-        slack_y=max(3,round(height*0.005))
-        if (x0<=slack_x and y0<=slack_y
-                and candidate.width-x1<=slack_x
-                and candidate.height-y1<=slack_y):
-            return candidate.crop(refined)
-    return candidate
+    left, top, right, bottom = bounds
+    # Retain 1 px around the exact nonwhite bounds when possible.
+    bounds = (max(0,left-1),max(0,top-1),
+              min(image.width,right+1),min(image.height,bottom+1))
+    return image.crop(bounds)
 
 
 def optimize_photo_for_portrait(image, size):
-    """Trim white borders, rotate to best portrait fit, and cover the panel.
+    """Best 90 degree orientation, with ALL meaningful source pixels retained.
 
-    Landscape source -> 90 degree physical rotation in file, so the long
-    reader screen is filled. The user can rotate the reader to view it.
-    Cover may crop content near the edges but never stretches the image.
+    Uses a white letterbox only when the photo's aspect ratio differs from
+    the reader's shape. No cover/center-crop. This prioritizes content over
+    an aggressively full-bleed appearance.
     """
     from PIL import Image, ImageOps
     if size not in RESOLUTIONS:
         raise ValueError("未知 mooInk 尺寸：" + str(size))
     source = crop_white_border(image)
     width, height = RESOLUTIONS[size]
-    aspect = source.width/source.height
-    target = width/height
-    keep = min(aspect/target, target/aspect)
-    turned = 1/aspect
-    rotate = min(turned/target,target/turned) > keep + 1e-8
+    aspect = source.width / source.height
+    target = width / height
+    keep = min(aspect / target, target / aspect)
+    turned = 1 / aspect
+    rotate = min(turned / target, target / turned) > keep + 1e-8
     if rotate:
         source = source.transpose(Image.Transpose.ROTATE_90)
-    # Maximize screen coverage, unlike contain which leaves wide empty bands.
-    return ImageOps.fit(source.convert("RGB"), (width,height),
-                        method=Image.Resampling.LANCZOS, centering=(0.5,0.5)), rotate
-
+    # Fit fully inside a portrait canvas; never remove photo edges.
+    prepared = ImageOps.contain(source.convert("RGB"), (width, height),
+                                Image.Resampling.LANCZOS)
+    result = Image.new("RGB", (width, height), "white")
+    result.paste(prepared, ((width-prepared.width)//2,
+                            (height-prepared.height)//2))
+    return result, rotate
 
 def photo_page_image(preview, *, size="10.3"):
     from PIL import Image, ImageOps

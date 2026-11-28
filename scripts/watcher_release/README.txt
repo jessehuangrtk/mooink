@@ -192,3 +192,27 @@ PHOTO MANAGEMENT INSIDE THE WATCHER
   USB device connection and size pairing are required; Pico is optional.
 - The photo batch conversion and the manually selected photo share the
   same portrait rotation, white-border removal and cover algorithm.
+
+USB DEVICE PHOTO MANAGEMENT (not merely the PC photo library):
+- In Advanced mode click "Photos on Mooink device". A separate window lists
+  every supported, connected WPD reader (by stable ID) and its sleep photos.
+  Select exactly one reader to operate on; other readers are never affected.
+- Supports refresh devices / photos, preview one selected photo, upload a
+  new photo, back up multiple selected photos, and BACK UP THEN DELETE multiple
+  selected photos after an explicit confirmation dialog.
+- Backups are in %LOCALAPPDATA%\\mooink\\device_photo_backup\\<full-device-ID>\\.
+  Preview also creates a verified backup on the PC. A photo cannot be deleted
+  unless the backup's exact source size, decoder and SHA256 verify. The WPD
+  image is re-downloaded and its hash rechecked immediately before deletion;
+  ambiguous or changed files are not deleted. The device is re-listed to
+  confirm disappearance, and a pending deletion halts following operations.
+- Upload prepares a portrait PNG using the device's paired 10.3/13.3 size,
+  automatically rotates and trims real pure-white borders; read-back SHA256
+  verification is required. Duplicate upload names are rejected; never
+  overwrite another photo. The automatic Watcher DOCX remains unchanged.
+- The local photo library is still available separately from "Local photo
+  library" in Advanced mode.
+- Image processing defaults to NO SOURCE CROPPING: it removes only near-white
+  edge padding and uses FIT/CONTAIN (not COVER) so subject details at edges
+  are preserved. If photo ratio differs from the panel, white bands remain.
+  The main preview and the transmitted image use this same placement.

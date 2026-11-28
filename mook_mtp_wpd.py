@@ -181,7 +181,7 @@ def _verify_local_image(path):
 
 def backup_and_delete_one(filename, backup_dir, *,
                           progress=None, delete_after=True,
-                          device_source=None):
+                          device_source=None, reader_id=None):
     """Use WPD stream (not Shell.CopyHere) and a prompt-free file delete.
 
     device_source allows FakeWPD devices for regression testing. In production
@@ -195,7 +195,7 @@ def backup_and_delete_one(filename, backup_dir, *,
         devices = list(device_source())
 
     try:
-        device = _choose_device(devices)
+        device = _choose_device(devices, reader_id=reader_id)
         sleep = _sleep_directory(device)
         item = _find_image(sleep, filename)
         expected = int(getattr(item, "size", -1) or -1)
@@ -236,6 +236,14 @@ def backup_and_delete_one(filename, backup_dir, *,
         latest = _find_image(sleep, filename)
         if int(getattr(latest, "size", -1) or -1) != expected:
             raise RuntimeError("WPD 原始檔大小在備份後改變，拒絕刪除")
+        # Reject same-size changes between backup and deletion.
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="mooink_recheck_") as temp:
+            reread = Path(temp) / filename
+            latest.download_file(str(reread))
+            if reread.stat().st_size != expected or hashlib.sha256(
+                    reread.read_bytes()).hexdigest() != digest:
+                raise RuntimeError("WPD 原始照片在備份後已改變，拒絕刪除")
         _report(progress, "deleting", message="WPD 刪除已備份圖片（不彈檔案總管確認）")
         latest.remove()
         # Re-query from device; confirmation is a disappearance, not a
@@ -260,7 +268,7 @@ def backup_and_delete_one(filename, backup_dir, *,
 
 
 
-def upload_one(source, *, progress=None, device_source=None):
+def upload_one(source, *, progress=None, device_source=None, reader_id=None):
     """Upload JPG/PNG to the unique mooInk sleep folder and read it back.
 
     Returns only a VERIFIED result after checking local and remote SHA256.
@@ -284,7 +292,7 @@ def upload_one(source, *, progress=None, device_source=None):
         devices = list(device_source())
 
     try:
-        device = _choose_device(devices)
+        device = _choose_device(devices, reader_id=reader_id)
         sleep = _sleep_directory(device)
         return _upload_to_sleep(sleep, path, progress)
     finally:

@@ -950,7 +950,9 @@ def main():
         button = ttk.Button(buttons,text=label,command=lambda a=action: manual_job(a))
         button.pack(side="left",padx=3)
         action_buttons.append(button)
-    ttk.Button(buttons,text="照片管理",command=lambda: open_photo_manager()).pack(
+    ttk.Button(buttons,text="裝置內照片管理",command=lambda: open_device_photo_manager()).pack(
+        side="left",padx=3)
+    ttk.Button(buttons,text="本機照片庫",command=lambda: open_photo_manager()).pack(
         side="left",padx=3)
     save_button = ttk.Button(frame,text="儲存並開始監控",command=save)
     save_button.grid(row=12,column=1,sticky="e",pady=10)
@@ -1082,6 +1084,11 @@ def main():
             dialog.destroy()
         ttk.Button(dialog,text="儲存此裝置尺寸並繼續" if retry_manual is not None
                    else "儲存此裝置尺寸",command=assign).pack(pady=14)
+
+    def open_device_photo_manager():
+        from mooink_device_photo_ui import DevicePhotoManager
+        DevicePhotoManager(root, registry, operation_lock,
+                           CONFIG_DIR / "device_photo_backup")
 
     def open_photo_manager():
         """Integrated photo library, reusing the current preview and USB uploader.

@@ -21,15 +21,17 @@ class PortraitPhotoTests(unittest.TestCase):
         filled, turned = optimize_photo_for_portrait(photo, "10.3")
         self.assertTrue(turned)
         self.assertEqual(filled.size, (1404,1872))
-        self.assertEqual(filled.getpixel((0,0)), (55,65,75))
-        self.assertEqual(filled.getpixel((1403,1871)), (55,65,75))
+        self.assertEqual(filled.getpixel((0,0)), (255,255,255))
+        self.assertEqual(filled.getpixel((1403,1871)), (255,255,255))
+        self.assertEqual(filled.getpixel((702,936)), (55,65,75))
 
     def test_portrait_photo_keeps_orientation(self):
         photo = Image.new("RGB", (600, 1000), (10, 20, 30))
         result, turned = optimize_photo_for_portrait(photo, "13.3")
         self.assertFalse(turned)
         self.assertEqual(result.size, (1650,2200))
-        self.assertEqual(result.getpixel((0,0)), (10,20,30))
+        self.assertEqual(result.getpixel((0,0)), (255,255,255))
+        self.assertEqual(result.getpixel((825,1100)), (10,20,30))
 
     def test_real_whitespace_border_trimmed(self):
         photo = Image.new("RGB",(850,550),"white")
@@ -39,9 +41,36 @@ class PortraitPhotoTests(unittest.TestCase):
         self.assertLess(cropped.height, photo.height-120)
         result, turned = optimize_photo_for_portrait(photo,"10.3")
         self.assertTrue(turned)
-        # After white removal and cover, no wide white bars remain on output.
-        self.assertTrue(all(channel < 100 for channel in result.getpixel((0,0))))
-        self.assertTrue(all(channel < 100 for channel in result.getpixel((1403,1871))))
+        # The source is kept intact: near-white padding is removed but
+        # nonmatching aspect ratios produce safe white side bars, not cropping.
+        self.assertEqual(result.getpixel((0,0)), (255,255,255))
+        self.assertTrue(all(channel < 100 for channel in result.getpixel((702,936))))
+
+
+    def test_important_edge_corners_survive_no_cover_crop(self):
+        photo = Image.new("RGB", (800,400), (60,60,60))
+        draw = ImageDraw.Draw(photo)
+        marks = [(255,0,0),(0,255,0),(0,0,255),(255,255,0)]
+        for box,color in zip([(0,0,80,80),(719,0,799,80),
+                              (0,319,80,399),(719,319,799,399)],marks):
+            draw.rectangle(box,fill=color)
+        portrait, turned = optimize_photo_for_portrait(photo,"10.3")
+        self.assertTrue(turned)
+        # Downsampled sampling is enough to find all four *edge* markers.
+        samples=list(portrait.resize((120,160), Image.Resampling.NEAREST).getdata())
+        for mark in marks:
+            self.assertTrue(any(sum(abs(px[i]-mark[i]) for i in range(3)) < 12
+                                for px in samples),
+                            "Edge marker disappeared: " + str(mark))
+
+    def test_thin_dark_line_at_photo_edge_preserved(self):
+        photo = Image.new("RGB",(500,700),"white")
+        draw=ImageDraw.Draw(photo)
+        draw.line((1,1,1,699),fill="black",width=1)
+        draw.rectangle((200,220,300,320),fill=(20,30,40))
+        cropped=crop_white_border(photo)
+        self.assertEqual(cropped.getpixel((1,1)),(0,0,0))
+        self.assertEqual(cropped.height,700)
 
     def test_white_photo_and_tiny_photo_do_not_crop_to_empty(self):
         white = Image.new("RGB",(400,700),"white")
