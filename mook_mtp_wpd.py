@@ -461,6 +461,49 @@ def replace_watch_image(source, backup_dir, *, progress=None, device_source=None
                     pass
 
 
+def cleanup_other_sleep_images(keep_filename, backup_dir, *,
+                               reader_id, progress=None, device_source=None):
+    """After a VERIFIED watcher update, back up and remove other sleep images.
+
+    Fail closed: this opt-in function requires the exact reader ID and an
+    existing reserved watcher PNG. Each JPG/JPEG/PNG is backed up, decoded,
+    SHA256-checked and re-read before deletion. Never remove directories or
+    non-image files. Stop immediately on a failed or unconfirmed deletion.
+
+    Safe for repeated calls after interrupted cleanup: only remaining images
+    are processed, and all prior backups are retained under the reader ID.
+    """
+    if keep_filename not in WATCH_NAMES:
+        raise ValueError("清理 sleep 時必須保留正確的 Watcher 專用 PNG")
+    if not isinstance(reader_id, str) or len(reader_id) != 64 or any(
+            char not in "0123456789abcdef" for char in reader_id):
+        raise ValueError("刪除其他照片必須指定完整的裝置 ID")
+    images = list_images(reader_id=reader_id, device_source=device_source)
+    matching = [row for row in images
+                if row["name"].casefold() == keep_filename.casefold()]
+    if len(matching) != 1 or not matching[0].get("size"):
+        raise QuietMtpUnavailable(
+            "裝置缺少已驗證的目標圖片 %s；拒絕清除其他照片" % keep_filename)
+    removable = [row for row in images
+                 if row["name"].casefold() != keep_filename.casefold()]
+    backup = Path(backup_dir).resolve() / reader_id
+    removed = []
+    for row in removable:
+        name = row["name"]
+        _report(progress, "cleanup", message="正在備份並清除其他 sleep 圖片：" + name)
+        outcome = backup_and_delete_one(
+            name, backup, progress=progress, delete_after=True,
+            device_source=device_source, reader_id=reader_id)
+        if not outcome.startswith("deleted+verified;"):
+            raise RuntimeError(
+                "其他圖片清理未確認成功，已停止後續刪除：%s：%s" % (name, outcome))
+        removed.append(name)
+    _report(progress, "cleanup_done",
+            message="sleep 其他照片清理完成：%d 張（備份在 %s）" %
+                    (len(removed), backup))
+    return removed
+
+
 def list_images(*, device_source=None, reader_id=None):
     """List JPG/PNG files directly from WPD after a verified upload."""
     if device_source is None:

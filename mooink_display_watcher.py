@@ -79,6 +79,7 @@ class Settings:
     interval_sec: int = 60
     pico_port: str = "COM6"  # blank disables Pico
     enable_usb: bool = False  # explicit opt-in for USB image replacement
+    delete_other_sleep_images: bool = False  # opt-in; backup before cleanup
     update_on_connect: bool = True  # initial USB connection and reconnection
     update_on_file_change: bool = True  # scheduled DOCX checks
     custom_docx: str = ""  # blank: size-specific DOCX in watch_dir
@@ -232,13 +233,24 @@ def render_cropped_png(source, output, size):
 
 def usb_upload(settings, source, log, reader_id=None):
     import pythoncom
-    from mook_mtp_wpd import replace_watch_image
+    from mook_mtp_wpd import replace_watch_image, cleanup_other_sleep_images
     pythoncom.CoInitialize()
     try:
-        return replace_watch_image(
+        result = replace_watch_image(
             source, CONFIG_DIR / "watcher_backup",
             progress=lambda stage, detail: log(detail.get("message", stage)),
             reader_id=reader_id)
+        if settings.delete_other_sleep_images:
+            # Only after WPD has SHA256-verified the target. Keep this
+            # destructive opt-in isolated to the SAME identified reader.
+            if reader_id is None:
+                raise RuntimeError("刪除其他 sleep 圖片需要指定已配對的裝置 ID")
+            removed = cleanup_other_sleep_images(
+                Path(source).name, CONFIG_DIR / "other_sleep_backup",
+                reader_id=reader_id,
+                progress=lambda stage, detail: log(detail.get("message", stage)))
+            result["other_sleep_deleted"] = len(removed)
+        return result
     finally:
         pythoncom.CoUninitialize()
 
@@ -866,12 +878,17 @@ def main():
                     variable=enable_usb).grid(row=6,column=0,columnspan=3,sticky="w",pady=5)
     update_on_connect = tk.BooleanVar(value=settings.update_on_connect)
     update_on_file_change = tk.BooleanVar(value=settings.update_on_file_change)
-    modes = ttk.LabelFrame(frame, text="自動更新觸發條件（可擇一或兩個都勾）", padding=6)
+    modes = ttk.LabelFrame(frame, text="USB 更新選項", padding=6)
     modes.grid(row=7,column=0,columnspan=3,sticky="ew",pady=4)
     ttk.Checkbutton(modes, text="插拔更新：USB 新連線／重新插入時立即同步",
                     variable=update_on_connect).pack(anchor="w")
     ttk.Checkbutton(modes, text="Polling file update：依設定秒數檢查 Word，變更後同步",
                     variable=update_on_file_change).pack(anchor="w")
+    delete_other_sleep = tk.BooleanVar(value=settings.delete_other_sleep_images)
+    ttk.Separator(modes, orient="horizontal").pack(fill="x", pady=(6,4))
+    ttk.Checkbutton(
+        modes, text="更新成功時刪除其他 sleep 圖片（先備份；預設不勾選）",
+        variable=delete_other_sleep).pack(anchor="w")
     ttk.Label(frame,text="手動選檔後按「立即更新」會裁白邊並傳送，不更動自動監控檔案。\n自動更新 DOCX 清空時依尺寸使用預設 Word。\n依尺寸產生 mooink_display_10 / 13 的 PNG。\nUSB MTP 備份舊同名 PNG → 上傳 → SHA-256 回讀驗證 → Pico Space（選用）。\n可同時連接多台 mooInk，先以裝置 ID 配對尺寸。\n多裝置 USB 更新不會自動傳送 Pico Space。",wraplength=530).grid(row=9,column=0,columnspan=3,sticky="w",pady=8)
     ttk.Label(frame,textvariable=connection_text).grid(row=8,column=0,columnspan=3,sticky="w")
     ttk.Label(frame,textvariable=status_text,wraplength=550).grid(row=10,column=0,columnspan=3,sticky="w",pady=5)
@@ -887,11 +904,22 @@ def main():
             values["update_on_connect"] = bool(update_on_connect.get())
             values["update_on_file_change"] = bool(update_on_file_change.get())
             values["stay_resident"] = bool(resident_setting.get())
+            values["delete_other_sleep_images"] = bool(delete_other_sleep.get())
             new=Settings(**values).validate()
+            if new.delete_other_sleep_images and not settings.delete_other_sleep_images:
+                if not messagebox.askyesno(
+                    "確認啟用清理其他 sleep 圖片",
+                    "啟用後，每次手動或自動更新圖片並回讀驗證成功，"
+                    "都會逐張備份並刪除該台 Mooink sleep 內的其他 JPG／PNG。\n"
+                    "不會刪除目前更新的圖片，也不會影響其他 Mooink。\n"
+                    "備份／刪除失敗時會停止後續清理。確定要啟用？",
+                    parent=root):
+                    return
             if new.enable_usb and (not settings.enable_usb or new.size != settings.size):
                 if not messagebox.askyesno("啟用 USB 更新",
                     "可同時接多台 Mooink，每台需先以裝置 ID 指定尺寸。\n"
-                    "將自動備份及替換 sleep 內專用同名 PNG；其他圖片不會刪除。確定啟用？",parent=root):
+                    "將自動備份並替換 sleep 內的專用 PNG；其他圖片是否清理取決於進階勾選設定。"
+                    "確定啟用？",parent=root):
                     return
             write_json(CONFIG,asdict(new))
             with settings_lock:

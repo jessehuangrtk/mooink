@@ -216,3 +216,25 @@ USB DEVICE PHOTO MANAGEMENT (not merely the PC photo library):
   edge padding and uses FIT/CONTAIN (not COVER) so subject details at edges
   are preserved. If photo ratio differs from the panel, white bands remain.
   The main preview and the transmitted image use this same placement.
+
+DELETE OTHER SLEEP PHOTOS ON UPDATE (OFF BY DEFAULT)
+- Advanced Mode > USB Update Options has a new checkbox:
+  "Delete other sleep pictures after successful update (backup first)".
+- Default false, including existing installations; setting is persisted as
+  delete_other_sleep_images in mooink_display_watcher.json.
+- Applies to BOTH manual Update Now and hot-plug/Word polling transfers.
+  Only triggers AFTER the new dedicated mooink_display_10.png or
+  mooink_display_13.png has been verified by WPD SHA-256 readback.
+- It keeps the just-updated reserved PNG and removes other JPG/JPEG/PNG files
+  from that ONE reader's sleep directory. It never deletes folders, non-image
+  files or photos on another connected Mooink.
+- Each removed picture is first downloaded into
+  %LOCALAPPDATA%\\mooink\\other_sleep_backup\\<full-device-ID>\\ and
+  checked for exact byte size and decodable image data. The remote source
+  is then re-downloaded for a SHA-256 check before deletion. The delete is
+  verified by relisting the device. If ANY backup, hash check or deletion
+  cannot be verified, cleanup stops; retained backups are not discarded.
+- Enabling this destructive option shows a separate confirmation prompt.
+  Keeping the checkbox OFF preserves all other sleep photos as before.
+  The Advanced "Photos on Mooink device" manager remains available even
+  when automatic cleanup is disabled.

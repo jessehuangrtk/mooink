@@ -470,3 +470,66 @@ class WatcherTests(unittest.TestCase):
             on = Settings(watch_dir=tmp, stay_resident=True)
             self.assertTrue(on.validate().stay_resident)
 
+
+
+class DeleteOtherSleepSettingsTests(unittest.TestCase):
+    def test_default_false_and_user_can_enable(self):
+        from mooink_display_watcher import Settings
+        from dataclasses import asdict
+        with tempfile.TemporaryDirectory() as tmp:
+            s=Settings(watch_dir=tmp)
+            self.assertFalse(s.delete_other_sleep_images)
+            self.assertFalse(asdict(s)["delete_other_sleep_images"])
+            on=Settings(watch_dir=tmp,delete_other_sleep_images=True)
+            self.assertTrue(on.validate().delete_other_sleep_images)
+
+    def test_successful_update_cleans_other_images_only_if_enabled(self):
+        from mooink_display_watcher import Settings, usb_upload
+        from unittest.mock import patch, Mock
+        from types import SimpleNamespace
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            picture=Path(tmp)/"mooink_display_10.png"
+            picture.write_bytes(b"image")
+            calls=[]
+            fakecom=SimpleNamespace(CoInitialize=lambda:None,CoUninitialize=lambda:None)
+            def replace_image(*args,**kwargs):
+                calls.append(("upload",kwargs.get("reader_id")))
+                return {"changed":True}
+            def cleanup(*args,**kwargs):
+                calls.append(("cleanup",kwargs["reader_id"]))
+                return ["old.png"]
+            with patch.dict(sys.modules,{"pythoncom":fakecom}), \
+                 patch("mook_mtp_wpd.replace_watch_image",side_effect=replace_image), \
+                 patch("mook_mtp_wpd.cleanup_other_sleep_images",side_effect=cleanup):
+                off=Settings(watch_dir=tmp,delete_other_sleep_images=False)
+                usb_upload(off,picture,lambda m:None,reader_id="a"*64)
+                self.assertEqual(calls,[("upload","a"*64)])
+                calls.clear()
+                on=Settings(watch_dir=tmp,delete_other_sleep_images=True)
+                result=usb_upload(on,picture,lambda m:None,reader_id="b"*64)
+                self.assertEqual(calls,[("upload","b"*64),("cleanup","b"*64)])
+                self.assertEqual(result["other_sleep_deleted"],1)
+
+    def test_failed_upload_never_cleans_and_missing_id_is_rejected(self):
+        from mooink_display_watcher import Settings, usb_upload
+        from unittest.mock import patch, Mock
+        from types import SimpleNamespace
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            picture=Path(tmp)/"mooink_display_10.png"
+            picture.write_bytes(b"image")
+            fakecom=SimpleNamespace(CoInitialize=lambda:None,CoUninitialize=lambda:None)
+            cfg=Settings(watch_dir=tmp,delete_other_sleep_images=True)
+            with patch.dict(sys.modules,{"pythoncom":fakecom}), \
+                 patch("mook_mtp_wpd.replace_watch_image",side_effect=OSError("USB lost")), \
+                 patch("mook_mtp_wpd.cleanup_other_sleep_images") as cleanup:
+                with self.assertRaises(OSError):
+                    usb_upload(cfg,picture,lambda m:None,reader_id="a"*64)
+                cleanup.assert_not_called()
+            with patch.dict(sys.modules,{"pythoncom":fakecom}), \
+                 patch("mook_mtp_wpd.replace_watch_image",return_value={"changed":False}), \
+                 patch("mook_mtp_wpd.cleanup_other_sleep_images") as cleanup:
+                with self.assertRaisesRegex(RuntimeError,"裝置 ID"):
+                    usb_upload(cfg,picture,lambda m:None)
+                cleanup.assert_not_called()

@@ -562,3 +562,74 @@ class DevicePhotoManagementTests(unittest.TestCase):
                                       device_source=lambda:[a],delete_after=True)
             self.assertEqual(image.remove_count,0)
             self.assertEqual(len(folder.children),1)
+
+
+class CleanupOtherSleepImagesTests(unittest.TestCase):
+    def _setup(self):
+        from mook_mtp_wpd import _reader_id
+        a, folder_a, _ = make_device(png_data())
+        b, folder_b, _ = make_device(png_data())
+        a._p_id = r"USB\\VID_1F85&PID_4E16\\CLEAN_A"
+        b._p_id = r"USB\\VID_1F85&PID_4E16\\CLEAN_B"
+        folder_a.children[0].name = "mooink_display_10.png"
+        folder_b.children[0].name = "other_reader.png"
+        other_a = FakeFile(folder_a, "holiday.jpg", png_data())
+        folder_a.children.append(other_a)
+        return a, folder_a, other_a, _reader_id(a), b, folder_b, _reader_id(b)
+
+    def test_opt_in_cleanup_only_target_reader_and_backups_all_other_pictures(self):
+        from mook_mtp_wpd import cleanup_other_sleep_images
+        a, fa, other, id_a, b, fb, id_b = self._setup()
+        extra=FakeFile(fa,"vacation.png",png_data())
+        fa.children.append(extra)
+        fa.children.append(FakeFolder("documents", 1))
+        fa.children.append(FakeFile(fa,"notes.txt",b"leave me"))
+        with tempfile.TemporaryDirectory() as tmp:
+            removed=cleanup_other_sleep_images(
+                "mooink_display_10.png",Path(tmp),reader_id=id_a,
+                device_source=lambda:[a,b])
+            self.assertEqual(removed,["holiday.jpg","vacation.png"])
+            self.assertEqual(other.remove_count,1)
+            self.assertEqual(extra.remove_count,1)
+            self.assertEqual([x.name for x in fa.children],
+                             ["mooink_display_10.png","documents","notes.txt"])
+            self.assertEqual([x.name for x in fb.children],["other_reader.png"])
+            self.assertEqual((Path(tmp)/id_a/"holiday.jpg").read_bytes(),other.payload)
+            self.assertEqual((Path(tmp)/id_a/"vacation.png").read_bytes(),extra.payload)
+            self.assertEqual(cleanup_other_sleep_images(
+                "mooink_display_10.png",Path(tmp),reader_id=id_a,
+                device_source=lambda:[a,b]),[])
+
+    def test_refuses_cleanup_without_verified_keep_image(self):
+        from mook_mtp_wpd import cleanup_other_sleep_images
+        a,fa,other,id_a,b,fb,id_b = self._setup()
+        with tempfile.TemporaryDirectory() as tmp:
+            for keep in ("mooink_display_13.png","holiday.jpg"):
+                with self.assertRaises((ValueError,QuietMtpUnavailable)):
+                    cleanup_other_sleep_images(
+                        keep,Path(tmp),reader_id=id_a,device_source=lambda:[a,b])
+            self.assertEqual(other.remove_count,0)
+            self.assertEqual(len(fa.children),2)
+
+    def test_no_reader_id_never_deletes_anything(self):
+        from mook_mtp_wpd import cleanup_other_sleep_images
+        a,fa,other,id_a,b,fb,id_b = self._setup()
+        with tempfile.TemporaryDirectory() as tmp:
+            for rid in (None,"f"*64,"abc"):
+                with self.assertRaises((ValueError,QuietMtpUnavailable)):
+                    cleanup_other_sleep_images("mooink_display_10.png",tmp,
+                        reader_id=rid,device_source=lambda:[a,b])
+            self.assertEqual(other.remove_count,0)
+
+    def test_corrupt_backup_stops_other_deletions(self):
+        from mook_mtp_wpd import cleanup_other_sleep_images
+        a,fa,other,id_a,b,fb,id_b = self._setup()
+        extra=FakeFile(fa,"later.png",png_data())
+        fa.children.append(extra)
+        other.size += 1
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError):
+                cleanup_other_sleep_images("mooink_display_10.png",tmp,
+                    reader_id=id_a,device_source=lambda:[a,b])
+            self.assertEqual(other.remove_count,0)
+            self.assertEqual(extra.remove_count,0)
