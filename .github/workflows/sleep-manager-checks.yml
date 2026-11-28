@@ -41,7 +41,7 @@ jobs:
 
       - name: Check Python syntax
         run: |
-          python -m compileall -q mook_sleep_screen_manager.py mook_sleep_screen_manager_ui.py mooink_full_cmd_demo.py mooink_display_watcher.py mooink_docx_pages.py mooink_multi_device.py mooink_wifi_pairing.py mooink_wifi_cover.py tests
+          python -m compileall -q mook_sleep_screen_manager.py mook_sleep_screen_manager_ui.py mooink_full_cmd_demo.py mooink_display_watcher.py mooink_docx_pages.py mooink_photo.py mooink_multi_device.py mooink_wifi_pairing.py mooink_wifi_cover.py tests
 
       - name: Backend regression tests (no reader required)
         run: |
@@ -67,7 +67,7 @@ jobs:
         shell: pwsh
         working-directory: ../mooink_display_watcher
         run: |
-          $files = @('mooink_display_10.docx','mooink_display_13.docx','mooink_display_10.png','mooink_display_13.png','release_commit.txt','third_party/heribert17_win_access.py','mooink_multi_device.py','mooink_docx_pages.py')
+          $files = @('mooink_display_10.docx','mooink_display_13.docx','mooink_display_10.png','mooink_display_13.png','release_commit.txt','third_party/heribert17_win_access.py','mooink_multi_device.py','mooink_docx_pages.py','mooink_photo.py')
           foreach ($file in $files) { if (!(Test-Path $file)) { throw "Missing release file: $file" } }
           if ((Get-Content release_commit.txt).Trim() -ne $env:GITHUB_SHA) { throw 'Incorrect release revision' }
           Set-Content mooink_display_10.docx 'user edited document'

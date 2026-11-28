@@ -223,8 +223,9 @@ def update_selected_docx(source, *, registry, discover, render, upload,
     import time
 
     path = Path(source).expanduser().resolve()
-    if path.suffix.casefold() != ".docx" or not path.is_file():
-        raise ValueError("請先選擇存在的 DOCX 檔案")
+    from mook_sleep_screen_manager import IMAGE_EXTS
+    if path.suffix.casefold() not in IMAGE_EXTS | {".docx"} or not path.is_file():
+        raise ValueError("請先選擇存在的 DOCX 或照片檔案")
     if not isinstance(page_number, int) or page_number < 1:
         raise ValueError("手動傳送頁碼必須從 1 開始")
     original = path.stat()

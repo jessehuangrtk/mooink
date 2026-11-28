@@ -87,12 +87,26 @@ def prepare_docx_preview(source, work_dir):
     return PagePreview(source, original_sha, original_mtime, pdf, count)
 
 
-def render_document_page(preview, page_number, *, scale=1.25):
-    """Return entire PDF page as a PIL RGB image, no cropped edges."""
-    import pymupdf
+def prepare_media_preview(source, work_dir):
+    """Word uses its multi-page PDF, photographs use photo preparation."""
+    from mook_sleep_screen_manager import IMAGE_EXTS
+    if Path(source).suffix.casefold() in IMAGE_EXTS:
+        from mooink_photo import prepare_photo_preview
+        return prepare_photo_preview(source, work_dir)
+    return prepare_docx_preview(source, work_dir)
+
+
+def render_document_page(preview, page_number, *, scale=1.25, size="10.3"):
+
+    """Return full PDF page or an auto-rotated portrait photo preview."""
+    from PIL import Image
     from PIL import Image
     if not 1 <= int(page_number) <= preview.page_count:
-        raise ValueError("指定頁碼不在 Word 的頁面範圍")
+        raise ValueError("指定頁碼不在檔案的頁面範圍")
+    from mooink_photo import PhotoPreview, photo_page_image
+    if isinstance(preview, PhotoPreview):
+        return photo_page_image(preview, size=size)
+    import pymupdf
     with pymupdf.open(preview.pdf) as doc:
         page = doc[int(page_number) - 1]
         ratio = min(float(scale), 2600/max(page.rect.width, page.rect.height))
@@ -101,7 +115,12 @@ def render_document_page(preview, page_number, *, scale=1.25):
 
 
 def render_selected_page_png(preview, page_number, size, output):
-    """Render selected page only; crop whitespace and keep a narrow white edge."""
+    """Selected DOCX page or portrait-first photograph -> reader PNG."""
+    from mooink_photo import PhotoPreview, render_photo_png
+    if isinstance(preview, PhotoPreview):
+        if int(page_number) != 1:
+            raise ValueError("照片只有一頁")
+        return render_photo_png(preview, size, output)
     import uuid
     from PIL import Image
     from mook_sleep_screen_manager import RESOLUTIONS

@@ -166,3 +166,29 @@ MAIN WINDOW / PAGE SELECTOR / ADVANCED MODE
   preview renderer is bundled via PyMuPDF. The preview PDF is temporary and
   is removed when the app exits. A multi-page selection never changes or
   overwrites the source DOCX.
+
+PHOTO MANAGEMENT INSIDE THE WATCHER
+- Main "Select File" now supports DOCX plus photos: JPG/JPEG, PNG, WEBP,
+  BMP, GIF, TIFF and AVIF (AVIF depends on installed Pillow codec).
+  Photos have one preview page (1/1) and use the same "Update Now" button.
+- The photograph preview displays the PORTRAIT mooInk output, not the
+  original landscape orientation. Horizontal photos automatically rotate
+  90 degrees when doing so keeps more of the source in the long screen.
+  Users may physically rotate the reader to view the photograph upright.
+- Image EXIF orientation is applied first, then almost-white borders are
+  trimmed. The result is enlarged using cover/center crop so that it fills
+  the entire physical portrait canvas (10.3 = 1404x1872; 13.3 = 1650x2200).
+  Cover may trim some outer subject edges on unusual aspect ratios; the
+  source picture is NEVER modified. Final USB PNG uses 16 gray levels.
+- "Advanced" mode adds "Photo Management" next to the USB device controls.
+  Users may add multiple photos, remove them from the list, double-click
+  to preview/select a photograph, and export ALL photos into separate
+  10.3/ and 13.3/ PNG folders for offline use. Removing only changes
+  the library list; original photos are never deleted.
+  Library paths are saved in %LOCALAPPDATA%\mooink\mooink_photo_library.json.
+- A manual photo transfer still respects each reader's ID-to-size pairing,
+  replaces ONLY its reserved watcher sleep PNG via verified WPD, and does
+  not modify the automatic DOCX watcher or its output images.
+  USB device connection and size pairing are required; Pico is optional.
+- The photo batch conversion and the manually selected photo share the
+  same portrait rotation, white-border removal and cover algorithm.

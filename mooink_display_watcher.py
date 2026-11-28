@@ -23,11 +23,13 @@ import uuid
 from mook_sleep_screen_manager import SleepScreenManager, RESOLUTIONS
 from mooink_multi_device import (DeviceRegistry, MultiDeviceController,
                                  update_selected_docx, ManualReaderUnavailable)
-from mooink_docx_pages import prepare_docx_preview, render_document_page, render_selected_page_png
+from mooink_docx_pages import prepare_media_preview, render_document_page, render_selected_page_png
+from mooink_photo import prepare_photo_batch
 
 CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "mooink"
 CONFIG = CONFIG_DIR / "mooink_display_watcher.json"
 MANUAL_SELECTION = CONFIG_DIR / "mooink_manual_docx.json"
+PHOTO_LIBRARY = CONFIG_DIR / "mooink_photo_library.json"
 STATE = CONFIG_DIR / "mooink_display_watcher_state.json"
 LOG = CONFIG_DIR / "mooink_display_watcher.log"
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -629,7 +631,7 @@ def main():
                     if (chosen_preview is None
                             or chosen_preview.source != selected
                             or not chosen_preview.source_unchanged()):
-                        raise RuntimeError("Word 自預覽後已變更，請重新選擇檔案及頁面")
+                        raise RuntimeError("來源檔自預覽後已變更，請重新選擇檔案及頁面")
                     with operation_lock:
                         summary = update_selected_docx(
                             selected, registry=registry, discover=usb_readers,
@@ -643,7 +645,7 @@ def main():
                             on_status=lambda rid, msg: events.put(
                                 ("device_status", (rid, msg))),
                             log=publish)
-                    info = "手動 DOCX 更新：%d 台成功、%d 台失敗" % (
+                    info = "手動檔案更新：%d 台成功、%d 台失敗" % (
                         len(summary["successful"]), len(summary["failed"]))
                     publish(info)
                     events.put(("manual_docx_done", (info, bool(summary["failed"]))))
@@ -652,7 +654,7 @@ def main():
                     events.put(("manual_reader_help",
                                 (manual_request, exc.reason, exc.readers, str(exc))))
                 except Exception as exc:
-                    info = "手動 DOCX 更新失敗：" + str(exc)
+                    info = "手動檔案更新失敗：" + str(exc)
                     publish(info)
                     events.put(("manual_docx_done", (info, True)))
             remaining = max(0.0, next_check - time.monotonic())
@@ -671,7 +673,8 @@ def main():
     fields = {}
     mode_advanced = False
 
-    saved_manual = read_json(MANUAL_SELECTION, {}).get("docx", "")
+    saved_selection = read_json(MANUAL_SELECTION, {})
+    saved_manual = saved_selection.get("file", saved_selection.get("docx", ""))
     manual_docx = tk.StringVar(value=saved_manual if isinstance(saved_manual, str) else "")
     manual_docx_busy = False
     preview_loading = False
@@ -684,7 +687,7 @@ def main():
 
     toolbar = ttk.Frame(left)
     toolbar.pack(side="top", fill="x", pady=(0, 8))
-    selected_name = tk.StringVar(value="尚未選擇 Word 檔案")
+    selected_name = tk.StringVar(value="尚未選擇 Word 或照片")
     page_label = tk.StringVar(value="0/0 頁")
     ttk.Label(left, textvariable=selected_name, anchor="center",
               wraplength=490).pack(fill="x", pady=(4, 5))
@@ -694,7 +697,7 @@ def main():
     page_scale.state(["disabled"])
     preview_canvas = tk.Canvas(left, width=490, height=610, highlightthickness=0)
     preview_canvas.pack(fill="both", expand=True)
-    preview_message = "選擇 DOCX 後顯示完整頁面"
+    preview_message = "選擇 Word 或照片以預覽完整頁面"
     preview_canvas.bind("<Configure>", lambda _: draw_preview_placeholder()
                         if preview_photo is None else show_preview_photo())
     preview_status = tk.StringVar(value="")
@@ -725,7 +728,8 @@ def main():
         generation = preview_generation
         current = preview_session
         try:
-            page_image = render_document_page(current, selected_page, scale=1.45)
+            page_image = render_document_page(current, selected_page, scale=1.45,
+                                              size=settings.size)
             target = (max(1, preview_canvas.winfo_width()-18),
                       max(1, preview_canvas.winfo_height()-18))
             page_image.thumbnail(target, Image.Resampling.LANCZOS)
@@ -755,17 +759,21 @@ def main():
         nonlocal preview_generation, preview_session, preview_loading
         nonlocal preview_total, preview_page, preview_photo, preview_message
         path = path or filedialog.askopenfilename(
-            parent=root, title="選擇 Word DOCX",
-            filetypes=[("Word DOCX", "*.docx")])
+            parent=root, title="選擇 Word 或照片",
+            filetypes=[("Word 與照片", "*.docx *.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.gif *.avif"),
+                       ("Word DOCX", "*.docx"),
+                       ("照片", "*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.gif *.avif"),
+                       ("所有檔案", "*.*")])
         if not path:
             return
         source = Path(path).expanduser().resolve()
-        if source.suffix.casefold() != ".docx" or not source.is_file():
-            messagebox.showerror("檔案錯誤", "請選擇存在的 DOCX", parent=root)
+        from mook_sleep_screen_manager import IMAGE_EXTS
+        if source.suffix.casefold() not in IMAGE_EXTS | {".docx"} or not source.is_file():
+            messagebox.showerror("檔案錯誤", "請選擇存在的 DOCX 或照片", parent=root)
             return
         manual_docx.set(str(source))
         try:
-            write_json(MANUAL_SELECTION, {"docx": str(source)})
+            write_json(MANUAL_SELECTION, {"file": str(source)})
         except OSError as exc:
             publish("記憶最近手動選檔失敗：" + str(exc))
         preview_generation += 1
@@ -775,17 +783,18 @@ def main():
         preview_total = 0
         preview_page = 1
         preview_photo = None
-        preview_message = "正在讀取 Word 頁面…"
+        preview_message = "正在讀取檔案預覽…"
         page_label.set("0/0 頁")
         selected_name.set(source.name)
-        preview_status.set("正在轉換 DOCX，建立頁面預覽…")
+        preview_status.set("正在準備圖片預覽…" if source.suffix.casefold()
+                           in IMAGE_EXTS else "正在轉換 DOCX，建立頁面預覽…")
         page_scale.state(["disabled"])
         update_button.configure(state="disabled")
         draw_preview_placeholder()
         def prepare():
             try:
                 folder = Path(preview_storage.name) / uuid.uuid4().hex
-                session = prepare_docx_preview(source, folder)
+                session = prepare_media_preview(source, folder)
                 events.put(("preview_ready", (generation, session)))
             except Exception as exc:
                 events.put(("preview_error", (generation, str(exc))))
@@ -839,7 +848,7 @@ def main():
             return
         if preview_session is None or not preview_session.source_unchanged():
             messagebox.showerror("頁面預覽失效",
-                                 "Word 已修改或尚未載入預覽，請重新選擇 DOCX。",
+                                 "照片/Word 已修改或尚未載入預覽，請重新選擇檔案。",
                                  parent=root)
             return
         selected = preview_session.source
@@ -941,6 +950,8 @@ def main():
         button = ttk.Button(buttons,text=label,command=lambda a=action: manual_job(a))
         button.pack(side="left",padx=3)
         action_buttons.append(button)
+    ttk.Button(buttons,text="照片管理",command=lambda: open_photo_manager()).pack(
+        side="left",padx=3)
     save_button = ttk.Button(frame,text="儲存並開始監控",command=save)
     save_button.grid(row=12,column=1,sticky="e",pady=10)
     action_buttons.append(save_button)
@@ -1072,6 +1083,109 @@ def main():
         ttk.Button(dialog,text="儲存此裝置尺寸並繼續" if retry_manual is not None
                    else "儲存此裝置尺寸",command=assign).pack(pady=14)
 
+    def open_photo_manager():
+        """Integrated photo library, reusing the current preview and USB uploader.
+
+        Paths are a user-managed library; originals never get moved/deleted.
+        Batch conversion produces size-specific PNG files for offline use.
+        """
+        from mook_sleep_screen_manager import IMAGE_EXTS
+        gallery_file = read_json(PHOTO_LIBRARY, {}).get("photos", [])
+        photos = ([path for path in gallery_file
+                   if isinstance(path,str) and Path(path).is_file()
+                   and Path(path).suffix.casefold() in IMAGE_EXTS]
+                  if isinstance(gallery_file,list) else [])
+        window = tk.Toplevel(root)
+        window.title("mooInk 照片管理")
+        window.geometry("680x520")
+        window.minsize(540,380)
+        window.transient(root)
+        window.configure(bg="#171b24" if mode_advanced else "#f6f7fa")
+        body = ttk.Frame(window,padding=12)
+        body.pack(fill="both",expand=True)
+        ttk.Label(body,text="照片庫：加入／移除照片，選一張送至左側預覽；"
+                  "批次製作兩種 mooInk 尺寸。",wraplength=620).pack(anchor="w",pady=(0,8))
+        list_frame = ttk.Frame(body)
+        list_frame.pack(fill="both",expand=True)
+        items = tk.Listbox(list_frame,selectmode="extended",
+                           exportselection=False, height=14,
+                           bg="#242a35" if mode_advanced else "white",
+                           fg="#eef2f6" if mode_advanced else "#1d2939",
+                           selectbackground="#516d92")
+        scrollbar=ttk.Scrollbar(list_frame,orient="vertical",command=items.yview)
+        items.configure(yscrollcommand=scrollbar.set)
+        items.pack(side="left",fill="both",expand=True)
+        scrollbar.pack(side="right",fill="y")
+        library_status = tk.StringVar(value="%d 張照片" % len(photos))
+        def refresh():
+            items.delete(0,"end")
+            for file in photos:
+                items.insert("end",Path(file).name + "  —  " + str(Path(file).parent))
+            write_json(PHOTO_LIBRARY, {"photos":photos})
+            library_status.set("照片庫：%d 張（只保存路徑，不修改原檔）" % len(photos))
+        def add():
+            choices = filedialog.askopenfilenames(
+                parent=window, title="匯入照片（可多選）",
+                filetypes=[("照片","*.jpg *.jpeg *.png *.webp *.bmp *.tif *.tiff *.gif *.avif")])
+            for choice in choices:
+                path = str(Path(choice).resolve())
+                if path not in photos:
+                    photos.append(path)
+            if choices:
+                refresh()
+        def remove():
+            for index in reversed(items.curselection()):
+                photos.pop(index)
+            refresh()
+        def choose():
+            choices=items.curselection()
+            if len(choices)!=1:
+                messagebox.showinfo("照片預覽","請先選取一張照片",parent=window)
+                return
+            source=photos[choices[0]]
+            if not Path(source).is_file():
+                messagebox.showwarning("照片不存在","找不到原始照片",parent=window)
+                return
+            select_manual_docx(source)
+            window.destroy()
+            root.lift()
+        control=ttk.Frame(body)
+        control.pack(fill="x",pady=(10,4))
+        ttk.Button(control,text="加入照片（多選）",command=add).pack(side="left",padx=(0,5))
+        ttk.Button(control,text="從清單移除",command=remove).pack(side="left",padx=(0,5))
+        ttk.Button(control,text="預覽／設為更新照片",command=choose).pack(side="left",padx=(0,5))
+        def batch_export():
+            existing=[file for file in photos if Path(file).is_file()]
+            if not existing:
+                messagebox.showwarning("沒有照片","請先加入照片",parent=window)
+                return
+            directory=filedialog.askdirectory(parent=window,title="選擇雙尺寸輸出根目錄")
+            if not directory:
+                return
+            export_button.configure(state="disabled")
+            library_status.set("正在製作 %d 張照片的 10.3 與 13.3 吋圖檔…" % len(existing))
+            def run():
+                try:
+                    output=prepare_photo_batch(existing,directory)
+                    events.put(("photo_batch_done",
+                                (window, library_status, export_button,
+                                 "%d 張照片已轉檔完成；10.3：%d、13.3：%d，儲存於 %s" %
+                                 (len(existing),len(output["10.3"]),len(output["13.3"]),directory),
+                                 False)))
+                except Exception as exc:
+                    events.put(("photo_batch_done",
+                                (window, library_status, export_button,
+                                 "照片批次轉檔失敗：" + str(exc),True)))
+            threading.Thread(target=run,daemon=True).start()
+        export_button=ttk.Button(body,text="批次製作 10.3 + 13.3 吋（自動旋轉／去白邊）",
+                                 command=batch_export)
+        export_button.pack(fill="x",pady=(5,5))
+        ttk.Label(body,textvariable=library_status,wraplength=630).pack(
+            fill="x",anchor="w")
+        refresh()
+        items.bind("<Double-Button-1>",lambda _:choose())
+
+
     def set_mode(advanced):
         """Advanced: right settings pane + dark colors; simple: three controls
         and full-page preview on a light canvas. Never save mode to disk."""
@@ -1174,10 +1288,18 @@ def main():
                 preview_loading = False
                 preview_session = None
                 preview_photo = None
-                preview_message = "無法預覽此 Word：" + message
+                preview_message = "無法預覽此檔案：" + message
                 preview_status.set(preview_message)
                 update_button.configure(state="disabled")
                 draw_preview_placeholder()
+            elif action=="photo_batch_done":
+                gallery_window, status_var, export_button, message, failed = value
+                if gallery_window.winfo_exists():
+                    status_var.set(message)
+                    export_button.configure(state="normal")
+                publish(message)
+                if failed:
+                    messagebox.showwarning("照片管理",message,parent=root)
             elif action=="connection":
                 connection_text.set(value)
             elif action=="inventory":

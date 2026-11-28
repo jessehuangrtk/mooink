@@ -26,7 +26,7 @@ if exist "%STAGE%" (
   exit /b 1
 )
 mkdir "%STAGE%" || goto failed
-for %%F in (mooink_display_watcher.py mooink_docx_pages.py mooink_multi_device.py mook_sleep_screen_manager.py mook_mtp_wpd.py pico2w_usb2bluetooth.py LICENSE) do (
+for %%F in (mooink_display_watcher.py mooink_docx_pages.py mooink_photo.py mooink_multi_device.py mook_sleep_screen_manager.py mook_mtp_wpd.py pico2w_usb2bluetooth.py LICENSE) do (
   copy /b /y "%%F" "%STAGE%\%%F" >nul || goto failed
 )
 mkdir "%STAGE%\template" || goto failed
